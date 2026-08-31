@@ -6,6 +6,7 @@ import CitySelector from "@/components/CitySelector";
 import MusicSelector from "@/components/MusicSelector";
 
 import { cities, musicGenres } from "@/constants/nightlifeData";
+import { venues } from "@/constants/venues";
 
 export default function HomeScreen() {
   const [selectedCity, setSelectedCity] = useState("");
@@ -13,6 +14,8 @@ export default function HomeScreen() {
 
   const [cityError, setCityError] = useState("");
   const [musicError, setMusicError] = useState("");
+
+  const [results, setResults] = useState<typeof venues>([]);
   const [showResults, setShowResults] = useState(false);
 
   function toggleMusic(genre: string) {
@@ -50,6 +53,17 @@ export default function HomeScreen() {
       return;
     }
 
+    const filteredVenues = venues.filter((venue) => {
+      const matchesCity = venue.city === selectedCity;
+
+      const matchesMusic = selectedMusic.some((music) =>
+        venue.musicGenres.includes(music),
+      );
+
+      return matchesCity && matchesMusic;
+    });
+
+    setResults(filteredVenues);
     setShowResults(true);
   }
 
@@ -87,15 +101,27 @@ export default function HomeScreen() {
         <View style={styles.resultsBox}>
           <Text style={styles.resultsTitle}>Rezultati pretrage</Text>
 
-          <Text style={styles.resultsText}>Grad: {selectedCity}</Text>
+          {results.length > 0 ? (
+            results.map((venue) => (
+              <View key={venue.id} style={styles.venueCard}>
+                <Text style={styles.venueName}>{venue.name}</Text>
 
-          <Text style={styles.resultsText}>
-            Muzika: {selectedMusic.join(", ")}
-          </Text>
+                <Text style={styles.venueText}>
+                  🎵 {venue.musicGenres.join(", ")}
+                </Text>
 
-          <Text style={styles.resultsText}>
-            Ovde će uskoro biti prikazana mesta.
-          </Text>
+                <Text style={styles.venueText}>
+                  🕐 Otvoreno do {venue.closingTime}
+                </Text>
+
+                <Text style={styles.venueText}>📍 {venue.distance} km</Text>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.resultsText}>
+              Nema mesta koja odgovaraju tvojoj pretrazi.
+            </Text>
+          )}
         </View>
       )}
     </ScrollView>
@@ -172,5 +198,24 @@ const styles = StyleSheet.create({
   resultsText: {
     fontSize: 16,
     marginVertical: 4,
+  },
+
+  venueCard: {
+    width: "100%",
+    padding: 15,
+    marginTop: 10,
+    borderRadius: 10,
+    backgroundColor: "#fff",
+  },
+
+  venueName: {
+    fontSize: 18,
+    fontWeight: "bold",
+    marginBottom: 8,
+  },
+
+  venueText: {
+    fontSize: 14,
+    marginVertical: 2,
   },
 });
