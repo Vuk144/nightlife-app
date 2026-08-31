@@ -18,6 +18,10 @@ export default function HomeScreen() {
   const [results, setResults] = useState<typeof venues>([]);
   const [showResults, setShowResults] = useState(false);
 
+  const [openSelector, setOpenSelector] = useState<"city" | "music" | null>(
+    null,
+  );
+
   function toggleMusic(genre: string) {
     if (selectedMusic.includes(genre)) {
       setSelectedMusic(selectedMusic.filter((music) => music !== genre));
@@ -79,6 +83,9 @@ export default function HomeScreen() {
         cities={cities}
         selectedCity={selectedCity}
         onSelectCity={handleCitySelect}
+        isOpen={openSelector === "city"}
+        onOpen={() => setOpenSelector("city")}
+        onClose={() => setOpenSelector(null)}
       />
 
       {cityError !== "" && <Text style={styles.errorText}>{cityError}</Text>}
@@ -89,6 +96,9 @@ export default function HomeScreen() {
         genres={musicGenres}
         selectedMusic={selectedMusic}
         onToggleMusic={toggleMusic}
+        isOpen={openSelector === "music"}
+        onOpen={() => setOpenSelector("music")}
+        onClose={() => setOpenSelector(null)}
       />
 
       {musicError !== "" && <Text style={styles.errorText}>{musicError}</Text>}

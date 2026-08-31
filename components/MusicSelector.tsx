@@ -1,40 +1,56 @@
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 
 type MusicSelectorProps = {
   genres: string[];
   selectedMusic: string[];
   onToggleMusic: (genre: string) => void;
+  isOpen: boolean;
+  onOpen: () => void;
+  onClose: () => void;
 };
 
 export default function MusicSelector({
   genres,
   selectedMusic,
   onToggleMusic,
+  isOpen,
+  onOpen,
+  onClose,
 }: MusicSelectorProps) {
   const [searchText, setSearchText] = useState("");
-  const [isOpen, setIsOpen] = useState(false);
 
   const filteredGenres = genres.filter((genre) =>
     genre.toLowerCase().includes(searchText.toLowerCase()),
   );
 
-  function handleInputPress() {
-    setIsOpen(!isOpen);
+  function handleBlur() {
+    setTimeout(() => {
+      onClose();
+    }, 150);
   }
 
   return (
-    <View style={styles.selector}>
-      <Pressable style={styles.inputContainer} onPress={handleInputPress}>
+    <View style={[styles.selector, { zIndex: isOpen ? 20 : 1 }]}>
+      <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
           placeholder="Pretraži muziku..."
           value={searchText}
           onChangeText={(text) => {
             setSearchText(text);
-            setIsOpen(true);
+            onOpen();
           }}
-          onFocus={() => setIsOpen(true)}
+          onFocus={onOpen}
+          onBlur={handleBlur}
         />
 
         {searchText !== "" && (
@@ -45,7 +61,7 @@ export default function MusicSelector({
             <Text style={styles.clearSmallText}>✕</Text>
           </Pressable>
         )}
-      </Pressable>
+      </View>
 
       {selectedMusic.length > 0 && (
         <View style={styles.selectedGenres}>
@@ -64,25 +80,27 @@ export default function MusicSelector({
       {isOpen && (
         <View style={styles.dropdown}>
           {filteredGenres.length > 0 ? (
-            filteredGenres.map((genre) => {
-              const isSelected = selectedMusic.includes(genre);
+            <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
+              {filteredGenres.map((genre) => {
+                const isSelected = selectedMusic.includes(genre);
 
-              return (
-                <Pressable
-                  key={genre}
-                  style={[
-                    styles.dropdownItem,
-                    isSelected && styles.selectedDropdownItem,
-                  ]}
-                  onPress={() => onToggleMusic(genre)}
-                >
-                  <Text style={styles.dropdownItemText}>
-                    {isSelected ? "✓ " : ""}
-                    {genre}
-                  </Text>
-                </Pressable>
-              );
-            })
+                return (
+                  <Pressable
+                    key={genre}
+                    style={[
+                      styles.dropdownItem,
+                      isSelected && styles.selectedDropdownItem,
+                    ]}
+                    onPress={() => onToggleMusic(genre)}
+                  >
+                    <Text style={styles.dropdownItemText}>
+                      {isSelected ? "✓ " : ""}
+                      {genre}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
           ) : (
             <Text style={styles.noResults}>Nema pronađenih žanrova.</Text>
           )}
@@ -96,6 +114,7 @@ const styles = StyleSheet.create({
   selector: {
     width: "100%",
     maxWidth: 500,
+    position: "relative",
   },
 
   inputContainer: {
@@ -124,12 +143,15 @@ const styles = StyleSheet.create({
   },
 
   dropdown: {
-    marginTop: 5,
+    position: "absolute",
+    top: 55,
+    left: 0,
+    right: 0,
+    maxHeight: 220,
     borderWidth: 1,
     borderColor: "#ddd",
     borderRadius: 10,
     backgroundColor: "#fff",
-    maxHeight: 220,
     overflow: "hidden",
   },
 

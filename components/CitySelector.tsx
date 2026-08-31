@@ -1,19 +1,32 @@
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 
 type CitySelectorProps = {
   cities: string[];
   selectedCity: string;
   onSelectCity: (city: string) => void;
+  isOpen: boolean;
+  onOpen: () => void;
+  onClose: () => void;
 };
 
 export default function CitySelector({
   cities,
   selectedCity,
   onSelectCity,
+  isOpen,
+  onOpen,
+  onClose,
 }: CitySelectorProps) {
   const [searchText, setSearchText] = useState("");
-  const [isOpen, setIsOpen] = useState(false);
 
   const filteredCities = cities.filter((city) =>
     city.toLowerCase().includes(searchText.toLowerCase()),
@@ -22,7 +35,7 @@ export default function CitySelector({
   function selectCity(city: string) {
     onSelectCity(city);
     setSearchText(city);
-    setIsOpen(false);
+    onClose();
   }
 
   function clearCity() {
@@ -30,8 +43,14 @@ export default function CitySelector({
     setSearchText("");
   }
 
+  function handleBlur() {
+    setTimeout(() => {
+      onClose();
+    }, 150);
+  }
+
   return (
-    <View style={styles.selector}>
+    <View style={[styles.selector, { zIndex: isOpen ? 20 : 1 }]}>
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
@@ -39,9 +58,10 @@ export default function CitySelector({
           value={searchText}
           onChangeText={(text) => {
             setSearchText(text);
-            setIsOpen(true);
+            onOpen();
           }}
-          onFocus={() => setIsOpen(true)}
+          onFocus={onOpen}
+          onBlur={handleBlur}
         />
 
         {selectedCity !== "" && (
@@ -54,18 +74,20 @@ export default function CitySelector({
       {isOpen && (
         <View style={styles.dropdown}>
           {filteredCities.length > 0 ? (
-            filteredCities.map((city) => (
-              <Pressable
-                key={city}
-                style={[
-                  styles.dropdownItem,
-                  selectedCity === city && styles.selectedDropdownItem,
-                ]}
-                onPress={() => selectCity(city)}
-              >
-                <Text style={styles.dropdownItemText}>{city}</Text>
-              </Pressable>
-            ))
+            <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
+              {filteredCities.map((city) => (
+                <Pressable
+                  key={city}
+                  style={[
+                    styles.dropdownItem,
+                    selectedCity === city && styles.selectedDropdownItem,
+                  ]}
+                  onPress={() => selectCity(city)}
+                >
+                  <Text style={styles.dropdownItemText}>{city}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
           ) : (
             <Text style={styles.noResults}>Nema pronađenih gradova.</Text>
           )}
@@ -79,6 +101,7 @@ const styles = StyleSheet.create({
   selector: {
     width: "100%",
     maxWidth: 500,
+    position: "relative",
   },
 
   inputContainer: {
@@ -107,12 +130,15 @@ const styles = StyleSheet.create({
   },
 
   dropdown: {
-    marginTop: 5,
+    position: "absolute",
+    top: 55,
+    left: 0,
+    right: 0,
+    maxHeight: 220,
     borderWidth: 1,
     borderColor: "#ddd",
     borderRadius: 10,
     backgroundColor: "#fff",
-    maxHeight: 220,
     overflow: "hidden",
   },
 
