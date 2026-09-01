@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
@@ -8,7 +8,7 @@ import MusicSelector from "@/components/MusicSelector";
 
 import { countries } from "@/constants/locations";
 import { musicGenres } from "@/constants/nightlifeData";
-import { venues } from "@/constants/venues";
+import { fetchVenues, type Venue } from "@/lib/venues";
 
 export default function HomeScreen() {
   const [selectedCountry, setSelectedCountry] = useState("");
@@ -19,12 +19,40 @@ export default function HomeScreen() {
   const [cityError, setCityError] = useState("");
   const [musicError, setMusicError] = useState("");
 
-  const [results, setResults] = useState<typeof venues>([]);
+  const [allVenues, setAllVenues] = useState<Venue[]>([]);
+  const [venuesLoading, setVenuesLoading] = useState(true);
+  const [venuesError, setVenuesError] = useState("");
+
+  const [results, setResults] = useState<Venue[]>([]);
   const [showResults, setShowResults] = useState(false);
 
   const [openSelector, setOpenSelector] = useState<
     "country" | "city" | "music" | null
   >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchVenues()
+      .then((data) => {
+        if (cancelled) return;
+        setAllVenues(data);
+        setVenuesError("");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setVenuesError(
+          error instanceof Error ? error.message : "Failed to load venues.",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setVenuesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const citiesForSelectedCountry =
     countries.find((country) => country.id === selectedCountry)?.cities ??
@@ -77,7 +105,7 @@ export default function HomeScreen() {
       return;
     }
 
-    const filteredVenues = venues.filter((venue) => {
+    const filteredVenues = allVenues.filter((venue) => {
       const matchesCountry = venue.country === selectedCountry;
       const matchesCity = venue.city === selectedCity;
 
@@ -145,6 +173,14 @@ export default function HomeScreen() {
         <Text style={styles.searchButtonText}>FIND PLACES</Text>
       </Pressable>
 
+      {venuesLoading && (
+        <Text style={styles.statusText}>Loading venues…</Text>
+      )}
+
+      {venuesError !== "" && (
+        <Text style={styles.errorText}>{venuesError}</Text>
+      )}
+
       {showResults && (
         <View style={styles.resultsBox}>
           <Text style={styles.resultsTitle}>Search results</Text>
@@ -162,7 +198,9 @@ export default function HomeScreen() {
                   🕐 Open until {venue.closingTime}
                 </Text>
 
-                <Text style={styles.venueText}>📍 {venue.distance} km</Text>
+                {venue.distance !== undefined && (
+                  <Text style={styles.venueText}>📍 {venue.distance} km</Text>
+                )}
               </View>
             ))
           ) : (
@@ -209,6 +247,13 @@ const styles = StyleSheet.create({
     maxWidth: 500,
     marginTop: 6,
     color: "red",
+    fontSize: 14,
+  },
+
+  statusText: {
+    width: "100%",
+    maxWidth: 500,
+    marginTop: 6,
     fontSize: 14,
   },
 
