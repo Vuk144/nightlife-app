@@ -43,7 +43,7 @@ export default function MusicSelector({
       <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
-          placeholder="Pretraži muziku..."
+          placeholder="Search for music..."
           value={searchText}
           onChangeText={(text) => {
             setSearchText(text);
@@ -102,7 +102,7 @@ export default function MusicSelector({
               })}
             </ScrollView>
           ) : (
-            <Text style={styles.noResults}>Nema pronađenih žanrova.</Text>
+            <Text style={styles.noResults}>No genres found.</Text>
           )}
         </View>
       )}

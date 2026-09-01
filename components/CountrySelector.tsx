@@ -9,39 +9,39 @@ import {
   View,
 } from "react-native";
 
-type CitySelectorProps = {
-  cities: string[];
-  selectedCity: string;
-  onSelectCity: (city: string) => void;
+import { Country } from "@/constants/locations";
+
+type CountrySelectorProps = {
+  countries: Country[];
+  selectedCountry: string;
+  onSelectCountry: (countryId: string) => void;
   isOpen: boolean;
   onOpen: () => void;
   onClose: () => void;
-  disabled?: boolean;
 };
 
-export default function CitySelector({
-  cities,
-  selectedCity,
-  onSelectCity,
+export default function CountrySelector({
+  countries,
+  selectedCountry,
+  onSelectCountry,
   isOpen,
   onOpen,
   onClose,
-  disabled = false,
-}: CitySelectorProps) {
+}: CountrySelectorProps) {
   const [searchText, setSearchText] = useState("");
 
-  const filteredCities = cities.filter((city) =>
-    city.toLowerCase().includes(searchText.toLowerCase()),
+  const filteredCountries = countries.filter((country) =>
+    country.name.toLowerCase().includes(searchText.toLowerCase()),
   );
 
-  function selectCity(city: string) {
-    onSelectCity(city);
-    setSearchText(city);
+  function selectCountry(country: Country) {
+    onSelectCountry(country.id);
+    setSearchText(country.name);
     onClose();
   }
 
-  function clearCity() {
-    onSelectCity("");
+  function clearCountry() {
+    onSelectCountry("");
     setSearchText("");
   }
 
@@ -53,54 +53,46 @@ export default function CitySelector({
 
   return (
     <View style={[styles.selector, { zIndex: isOpen ? 20 : 1 }]}>
-      <View
-        style={[styles.inputContainer, disabled && styles.inputContainerDisabled]}
-      >
+      <View style={styles.inputContainer}>
         <TextInput
           style={styles.input}
-          placeholder={
-            disabled ? "Select a country first" : "Search for a city..."
-          }
+          placeholder="Search for a country..."
           value={searchText}
-          editable={!disabled}
           onChangeText={(text) => {
             setSearchText(text);
             onOpen();
           }}
-          onFocus={() => {
-            if (!disabled) {
-              onOpen();
-            }
-          }}
+          onFocus={onOpen}
           onBlur={handleBlur}
         />
 
-        {selectedCity !== "" && (
-          <Pressable style={styles.clearSmallButton} onPress={clearCity}>
+        {selectedCountry !== "" && (
+          <Pressable style={styles.clearSmallButton} onPress={clearCountry}>
             <Text style={styles.clearSmallText}>✕</Text>
           </Pressable>
         )}
       </View>
 
-      {isOpen && !disabled && (
+      {isOpen && (
         <View style={styles.dropdown}>
-          {filteredCities.length > 0 ? (
+          {filteredCountries.length > 0 ? (
             <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
-              {filteredCities.map((city) => (
+              {filteredCountries.map((country) => (
                 <Pressable
-                  key={city}
+                  key={country.id}
                   style={[
                     styles.dropdownItem,
-                    selectedCity === city && styles.selectedDropdownItem,
+                    selectedCountry === country.id &&
+                      styles.selectedDropdownItem,
                   ]}
-                  onPress={() => selectCity(city)}
+                  onPress={() => selectCountry(country)}
                 >
-                  <Text style={styles.dropdownItemText}>{city}</Text>
+                  <Text style={styles.dropdownItemText}>{country.name}</Text>
                 </Pressable>
               ))}
             </ScrollView>
           ) : (
-            <Text style={styles.noResults}>No cities found.</Text>
+            <Text style={styles.noResults}>No countries found.</Text>
           )}
         </View>
       )}
@@ -122,10 +114,6 @@ const styles = StyleSheet.create({
     borderColor: "#ccc",
     borderRadius: 10,
     backgroundColor: "#fff",
-  },
-
-  inputContainerDisabled: {
-    backgroundColor: "#f2f2f2",
   },
 
   input: {

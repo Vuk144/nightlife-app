@@ -3,24 +3,32 @@ import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import CitySelector from "@/components/CitySelector";
+import CountrySelector from "@/components/CountrySelector";
 import MusicSelector from "@/components/MusicSelector";
 
-import { cities, musicGenres } from "@/constants/nightlifeData";
+import { countries } from "@/constants/locations";
+import { musicGenres } from "@/constants/nightlifeData";
 import { venues } from "@/constants/venues";
 
 export default function HomeScreen() {
+  const [selectedCountry, setSelectedCountry] = useState("");
   const [selectedCity, setSelectedCity] = useState("");
   const [selectedMusic, setSelectedMusic] = useState<string[]>([]);
 
+  const [countryError, setCountryError] = useState("");
   const [cityError, setCityError] = useState("");
   const [musicError, setMusicError] = useState("");
 
   const [results, setResults] = useState<typeof venues>([]);
   const [showResults, setShowResults] = useState(false);
 
-  const [openSelector, setOpenSelector] = useState<"city" | "music" | null>(
-    null,
-  );
+  const [openSelector, setOpenSelector] = useState<
+    "country" | "city" | "music" | null
+  >(null);
+
+  const citiesForSelectedCountry =
+    countries.find((country) => country.id === selectedCountry)?.cities ??
+    [];
 
   function toggleMusic(genre: string) {
     if (selectedMusic.includes(genre)) {
@@ -33,6 +41,13 @@ export default function HomeScreen() {
     setShowResults(false);
   }
 
+  function handleCountrySelect(countryId: string) {
+    setSelectedCountry(countryId);
+    setSelectedCity("");
+    setCountryError("");
+    setShowResults(false);
+  }
+
   function handleCitySelect(city: string) {
     setSelectedCity(city);
     setCityError("");
@@ -42,13 +57,18 @@ export default function HomeScreen() {
   function handleSearch() {
     let hasError = false;
 
+    if (selectedCountry === "") {
+      setCountryError("Select a country.");
+      hasError = true;
+    }
+
     if (selectedCity === "") {
-      setCityError("Izaberi grad.");
+      setCityError("Select a city.");
       hasError = true;
     }
 
     if (selectedMusic.length === 0) {
-      setMusicError("Izaberi bar jednu vrstu muzike.");
+      setMusicError("Select at least one music genre.");
       hasError = true;
     }
 
@@ -58,13 +78,14 @@ export default function HomeScreen() {
     }
 
     const filteredVenues = venues.filter((venue) => {
+      const matchesCountry = venue.country === selectedCountry;
       const matchesCity = venue.city === selectedCity;
 
       const matchesMusic = selectedMusic.some((music) =>
         venue.musicGenres.includes(music),
       );
 
-      return matchesCity && matchesMusic;
+      return matchesCountry && matchesCity && matchesMusic;
     });
 
     setResults(filteredVenues);
@@ -73,16 +94,33 @@ export default function HomeScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Gde idemo večeras?</Text>
+      <Text style={styles.title}>Where are we going tonight?</Text>
 
-      <Text style={styles.subtitle}>Pronađi najbolje mesto za izlazak.</Text>
+      <Text style={styles.subtitle}>Find the best places to go out.</Text>
 
-      <Text style={styles.sectionTitle}>Selektuj grad</Text>
+      <Text style={styles.sectionTitle}>Select a country</Text>
+
+      <CountrySelector
+        countries={countries}
+        selectedCountry={selectedCountry}
+        onSelectCountry={handleCountrySelect}
+        isOpen={openSelector === "country"}
+        onOpen={() => setOpenSelector("country")}
+        onClose={() => setOpenSelector(null)}
+      />
+
+      {countryError !== "" && (
+        <Text style={styles.errorText}>{countryError}</Text>
+      )}
+
+      <Text style={styles.sectionTitle}>Select a city</Text>
 
       <CitySelector
-        cities={cities}
+        key={selectedCountry}
+        cities={citiesForSelectedCountry}
         selectedCity={selectedCity}
         onSelectCity={handleCitySelect}
+        disabled={selectedCountry === ""}
         isOpen={openSelector === "city"}
         onOpen={() => setOpenSelector("city")}
         onClose={() => setOpenSelector(null)}
@@ -90,7 +128,7 @@ export default function HomeScreen() {
 
       {cityError !== "" && <Text style={styles.errorText}>{cityError}</Text>}
 
-      <Text style={styles.sectionTitle}>Koju muziku voliš?</Text>
+      <Text style={styles.sectionTitle}>What music do you like?</Text>
 
       <MusicSelector
         genres={musicGenres}
@@ -104,12 +142,12 @@ export default function HomeScreen() {
       {musicError !== "" && <Text style={styles.errorText}>{musicError}</Text>}
 
       <Pressable style={styles.searchButton} onPress={handleSearch}>
-        <Text style={styles.searchButtonText}>PRONAĐI MESTA</Text>
+        <Text style={styles.searchButtonText}>FIND PLACES</Text>
       </Pressable>
 
       {showResults && (
         <View style={styles.resultsBox}>
-          <Text style={styles.resultsTitle}>Rezultati pretrage</Text>
+          <Text style={styles.resultsTitle}>Search results</Text>
 
           {results.length > 0 ? (
             results.map((venue) => (
@@ -121,7 +159,7 @@ export default function HomeScreen() {
                 </Text>
 
                 <Text style={styles.venueText}>
-                  🕐 Otvoreno do {venue.closingTime}
+                  🕐 Open until {venue.closingTime}
                 </Text>
 
                 <Text style={styles.venueText}>📍 {venue.distance} km</Text>
@@ -129,7 +167,7 @@ export default function HomeScreen() {
             ))
           ) : (
             <Text style={styles.resultsText}>
-              Nema mesta koja odgovaraju tvojoj pretrazi.
+              No places match your search.
             </Text>
           )}
         </View>

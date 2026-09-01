@@ -1,6 +1,7 @@
 export type Venue = {
   id: number;
   name: string;
+  country: string;
   city: string;
   musicGenres: string[];
   closingTime: string;
@@ -11,7 +12,8 @@ export const venues: Venue[] = [
   {
     id: 1,
     name: "Drugstore",
-    city: "Beograd",
+    country: "RS",
+    city: "Belgrade",
     musicGenres: ["Techno", "House", "Electro"],
     closingTime: "04:00",
     distance: 2.1,
@@ -19,7 +21,8 @@ export const venues: Venue[] = [
   {
     id: 2,
     name: "20/44",
-    city: "Beograd",
+    country: "RS",
+    city: "Belgrade",
     musicGenres: ["House", "Tech House", "Disco"],
     closingTime: "03:00",
     distance: 3.4,
@@ -27,14 +30,16 @@ export const venues: Venue[] = [
   {
     id: 3,
     name: "KST",
-    city: "Beograd",
-    musicGenres: ["Rock", "Domaće", "Alternative Rock"],
+    country: "RS",
+    city: "Belgrade",
+    musicGenres: ["Rock", "Domestic", "Alternative Rock"],
     closingTime: "02:00",
     distance: 1.8,
   },
   {
     id: 4,
     name: "GIGS",
+    country: "RS",
     city: "Novi Sad",
     musicGenres: ["Techno", "House", "Tech House"],
     closingTime: "04:00",
@@ -43,6 +48,7 @@ export const venues: Venue[] = [
   {
     id: 5,
     name: "The Quarter",
+    country: "RS",
     city: "Novi Sad",
     musicGenres: ["Rock", "Indie Rock", "Alternative Rock"],
     closingTime: "02:00",
@@ -51,6 +57,7 @@ export const venues: Venue[] = [
   {
     id: 6,
     name: "Paradise Garage",
+    country: "RS",
     city: "Niš",
     musicGenres: ["House", "Techno", "Disco"],
     closingTime: "03:00",
