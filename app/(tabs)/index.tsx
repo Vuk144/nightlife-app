@@ -1,6 +1,17 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import * as Location from "expo-location";
+
+import {
+  BackHandler,
+  Keyboard,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 
 import CitySelector from "@/components/CitySelector";
 import CountrySelector from "@/components/CountrySelector";
@@ -30,6 +41,56 @@ export default function HomeScreen() {
     "country" | "city" | "music" | null
   >(null);
 
+  const [coords, setCoords] = useState<{
+    latitude: number;
+    longitude: number;
+  } | null>(null);
+  const [locationStatus, setLocationStatus] = useState<
+    "loading" | "granted" | "denied" | "error"
+  >("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    let subscription: Location.LocationSubscription | null = null;
+
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+
+      if (cancelled) return;
+
+      if (status !== "granted") {
+        setLocationStatus("denied");
+        return;
+      }
+
+      try {
+        subscription = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.Balanced,
+            timeInterval: 5000,
+            distanceInterval: 10,
+          },
+          (position) => {
+            if (cancelled) return;
+
+            setCoords({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            });
+            setLocationStatus("granted");
+          },
+        );
+      } catch {
+        if (!cancelled) setLocationStatus("error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      subscription?.remove();
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -53,6 +114,65 @@ export default function HomeScreen() {
       cancelled = true;
     };
   }, []);
+
+  function closeSelector() {
+    setOpenSelector(null);
+    Keyboard.dismiss();
+  }
+
+  // Refs (not state) so the back-button handler always reads the latest
+  // values without needing to re-subscribe the listener on every change.
+  const keyboardVisibleRef = useRef(false);
+  const openSelectorRef = useRef(openSelector);
+
+  useEffect(() => {
+    openSelectorRef.current = openSelector;
+  }, [openSelector]);
+
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener("keyboardDidShow", () => {
+      keyboardVisibleRef.current = true;
+    });
+    const hideSubscription = Keyboard.addListener("keyboardDidHide", () => {
+      keyboardVisibleRef.current = false;
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
+  // Android back button priority: dismiss the keyboard first if it's open,
+  // otherwise close an open dropdown, otherwise let normal back navigation
+  // happen. Also used as each selector Modal's onRequestClose so the same
+  // priority applies regardless of which one Android routes the press to.
+  const handleBackButton = useCallback(() => {
+    if (keyboardVisibleRef.current) {
+      Keyboard.dismiss();
+      return true;
+    }
+
+    if (openSelectorRef.current !== null) {
+      setOpenSelector(null);
+      return true;
+    }
+
+    return false;
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+
+    const subscription = BackHandler.addEventListener(
+      "hardwareBackPress",
+      handleBackButton,
+    );
+
+    return () => {
+      subscription.remove();
+    };
+  }, [handleBackButton]);
 
   const citiesForSelectedCountry =
     countries.find((country) => country.id === selectedCountry)?.cities ??
@@ -121,10 +241,40 @@ export default function HomeScreen() {
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView
+      style={styles.scrollView}
+      contentContainerStyle={styles.container}
+      keyboardShouldPersistTaps="handled"
+    >
       <Text style={styles.title}>Where are we going tonight?</Text>
 
       <Text style={styles.subtitle}>Find the best places to go out.</Text>
+
+      <View style={styles.locationBox}>
+        {locationStatus === "loading" && (
+          <Text style={styles.statusText}>Getting your location…</Text>
+        )}
+
+        {locationStatus === "granted" && coords && (
+          <Text style={styles.statusText}>
+            📍 Lat: {coords.latitude.toFixed(5)}, Lng:{" "}
+            {coords.longitude.toFixed(5)}
+          </Text>
+        )}
+
+        {locationStatus === "denied" && (
+          <Text style={styles.errorText}>
+            Location permission denied. Enable it in your device settings to
+            use location features.
+          </Text>
+        )}
+
+        {locationStatus === "error" && (
+          <Text style={styles.errorText}>
+            Couldn&apos;t get your location. Please try again.
+          </Text>
+        )}
+      </View>
 
       <Text style={styles.sectionTitle}>Select a country</Text>
 
@@ -134,7 +284,8 @@ export default function HomeScreen() {
         onSelectCountry={handleCountrySelect}
         isOpen={openSelector === "country"}
         onOpen={() => setOpenSelector("country")}
-        onClose={() => setOpenSelector(null)}
+        onClose={closeSelector}
+        onBackButtonPress={handleBackButton}
       />
 
       {countryError !== "" && (
@@ -151,7 +302,8 @@ export default function HomeScreen() {
         disabled={selectedCountry === ""}
         isOpen={openSelector === "city"}
         onOpen={() => setOpenSelector("city")}
-        onClose={() => setOpenSelector(null)}
+        onClose={closeSelector}
+        onBackButtonPress={handleBackButton}
       />
 
       {cityError !== "" && <Text style={styles.errorText}>{cityError}</Text>}
@@ -164,7 +316,8 @@ export default function HomeScreen() {
         onToggleMusic={toggleMusic}
         isOpen={openSelector === "music"}
         onOpen={() => setOpenSelector("music")}
-        onClose={() => setOpenSelector(null)}
+        onClose={closeSelector}
+        onBackButtonPress={handleBackButton}
       />
 
       {musicError !== "" && <Text style={styles.errorText}>{musicError}</Text>}
@@ -215,6 +368,10 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  scrollView: {
+    flex: 1,
+  },
+
   container: {
     padding: 30,
     alignItems: "center",
@@ -231,6 +388,12 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 16,
     marginBottom: 30,
+  },
+
+  locationBox: {
+    width: "100%",
+    maxWidth: 500,
+    marginBottom: 10,
   },
 
   sectionTitle: {

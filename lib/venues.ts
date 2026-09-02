@@ -6,6 +6,8 @@ type VenueQueryRow = {
   name: string;
   closing_time: string | null;
   is_active: boolean;
+  latitude: number | null;
+  longitude: number | null;
   cities: { name: string; country_id: string } | null;
   music_genres: { name: string }[];
 };
@@ -20,6 +22,8 @@ export type Venue = {
   city: string;
   musicGenres: string[];
   closingTime: string;
+  latitude: number | null;
+  longitude: number | null;
   distance?: number;
 };
 
@@ -27,7 +31,7 @@ export async function fetchVenues(): Promise<Venue[]> {
   const { data, error } = await supabase
     .from("venues")
     .select(
-      "id, name, closing_time, is_active, cities(name, country_id), music_genres(name)",
+      "id, name, closing_time, is_active, latitude, longitude, cities(name, country_id), music_genres(name)",
     )
     .order("name")
     .returns<VenueQueryRow[]>();
@@ -43,5 +47,7 @@ export async function fetchVenues(): Promise<Venue[]> {
     city: row.cities?.name ?? "",
     musicGenres: row.music_genres.map((genre) => genre.name),
     closingTime: (row.closing_time ?? "").slice(0, 5), // "04:00:00" -> "04:00"
+    latitude: row.latitude,
+    longitude: row.longitude,
   }));
 }

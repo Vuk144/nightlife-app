@@ -1,13 +1,25 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import {
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
+
+const DROPDOWN_MAX_HEIGHT = 220;
+
+type Anchor = {
+  left: number;
+  width: number;
+  inputTop: number;
+  dropdownTop?: number;
+  dropdownBottom?: number;
+};
 
 type CitySelectorProps = {
   cities: string[];
@@ -16,6 +28,7 @@ type CitySelectorProps = {
   isOpen: boolean;
   onOpen: () => void;
   onClose: () => void;
+  onBackButtonPress: () => void;
   disabled?: boolean;
 };
 
@@ -26,13 +39,42 @@ export default function CitySelector({
   isOpen,
   onOpen,
   onClose,
+  onBackButtonPress,
   disabled = false,
 }: CitySelectorProps) {
   const [searchText, setSearchText] = useState("");
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const inputContainerRef = useRef<View>(null);
+  const modalInputRef = useRef<TextInput>(null);
+  const { height: windowHeight } = useWindowDimensions();
 
   const filteredCities = cities.filter((city) =>
     city.toLowerCase().includes(searchText.toLowerCase()),
   );
+
+  // Measures the closed-state input's on-screen position so the Modal (the
+  // active search input while open, plus the dropdown list) can be placed at
+  // the same spot. Opens the dropdown upward instead when there isn't enough
+  // room below on screen.
+  function openDropdown() {
+    if (disabled) return;
+
+    inputContainerRef.current?.measureInWindow((x, y, width, height) => {
+      const spaceBelow = windowHeight - (y + height);
+      const spaceAbove = y;
+      const openUpward =
+        spaceBelow < DROPDOWN_MAX_HEIGHT && spaceAbove > spaceBelow;
+
+      setAnchor({
+        left: x,
+        width,
+        inputTop: y,
+        dropdownTop: openUpward ? undefined : y + height,
+        dropdownBottom: openUpward ? windowHeight - y : undefined,
+      });
+    });
+    onOpen();
+  }
 
   function selectCity(city: string) {
     onSelectCity(city);
@@ -45,35 +87,34 @@ export default function CitySelector({
     setSearchText("");
   }
 
-  function handleBlur() {
-    setTimeout(() => {
-      onClose();
-    }, 150);
-  }
-
   return (
-    <View style={[styles.selector, { zIndex: isOpen ? 20 : 1 }]}>
+    <View style={styles.selector}>
+      {/* Closed-state row: a plain Pressable, not a TextInput — nothing
+          here is focusable, so there's no Autofill-capable field and no
+          stale-focus state to worry about between opens. The active,
+          typable input lives inside the Modal below while open. */}
       <View
-        style={[styles.inputContainer, disabled && styles.inputContainerDisabled]}
+        style={[
+          styles.inputContainer,
+          disabled && styles.inputContainerDisabled,
+        ]}
+        ref={inputContainerRef}
       >
-        <TextInput
-          style={styles.input}
-          placeholder={
-            disabled ? "Select a country first" : "Search for a city..."
-          }
-          value={searchText}
-          editable={!disabled}
-          onChangeText={(text) => {
-            setSearchText(text);
-            onOpen();
-          }}
-          onFocus={() => {
-            if (!disabled) {
-              onOpen();
-            }
-          }}
-          onBlur={handleBlur}
-        />
+        <Pressable
+          style={styles.closedInputPressable}
+          onPress={openDropdown}
+          disabled={disabled}
+        >
+          <Text
+            style={[
+              styles.closedInputText,
+              searchText === "" && styles.closedInputPlaceholder,
+            ]}
+          >
+            {searchText ||
+              (disabled ? "Select a country first" : "Search for a city...")}
+          </Text>
+        </Pressable>
 
         {selectedCity !== "" && (
           <Pressable style={styles.clearSmallButton} onPress={clearCity}>
@@ -82,28 +123,84 @@ export default function CitySelector({
         )}
       </View>
 
-      {isOpen && !disabled && (
-        <View style={styles.dropdown}>
-          {filteredCities.length > 0 ? (
-            <ScrollView nestedScrollEnabled keyboardShouldPersistTaps="handled">
-              {filteredCities.map((city) => (
-                <Pressable
-                  key={city}
-                  style={[
-                    styles.dropdownItem,
-                    selectedCity === city && styles.selectedDropdownItem,
-                  ]}
-                  onPress={() => selectCity(city)}
-                >
-                  <Text style={styles.dropdownItemText}>{city}</Text>
+      {/* Rendered in a Modal so the dropdown's own ScrollView is never a
+          descendant of the page's ScrollView — no nested same-direction
+          scroll gesture to contend with. Also gives the active search input
+          the same window as the dropdown, so opening it doesn't steal the
+          keyboard away from a focused input outside the Modal. */}
+      <Modal
+        visible={isOpen && !disabled}
+        transparent
+        animationType="none"
+        onRequestClose={onBackButtonPress}
+        onShow={() => modalInputRef.current?.focus()}
+      >
+        {/* Full-screen backdrop: behind the input row and dropdown box
+            (rendered first, so they paint on top and get first claim on
+            touches inside their own bounds), but catches every tap
+            outside them. */}
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+
+        {anchor && (
+          <>
+            <View
+              style={[
+                styles.inputContainer,
+                styles.modalInputContainer,
+                { top: anchor.inputTop, left: anchor.left, width: anchor.width },
+              ]}
+            >
+              <TextInput
+                ref={modalInputRef}
+                style={styles.input}
+                placeholder="Search for a city..."
+                value={searchText}
+                onChangeText={setSearchText}
+              />
+
+              {selectedCity !== "" && (
+                <Pressable style={styles.clearSmallButton} onPress={clearCity}>
+                  <Text style={styles.clearSmallText}>✕</Text>
                 </Pressable>
-              ))}
-            </ScrollView>
-          ) : (
-            <Text style={styles.noResults}>No cities found.</Text>
-          )}
-        </View>
-      )}
+              )}
+            </View>
+
+            <View
+              style={[
+                styles.dropdown,
+                {
+                  top: anchor.dropdownTop,
+                  bottom: anchor.dropdownBottom,
+                  left: anchor.left,
+                  width: anchor.width,
+                },
+              ]}
+            >
+              {filteredCities.length > 0 ? (
+                <ScrollView
+                  keyboardShouldPersistTaps="handled"
+                  style={styles.dropdownScroll}
+                >
+                  {filteredCities.map((city) => (
+                    <Pressable
+                      key={city}
+                      style={[
+                        styles.dropdownItem,
+                        selectedCity === city && styles.selectedDropdownItem,
+                      ]}
+                      onPress={() => selectCity(city)}
+                    >
+                      <Text style={styles.dropdownItemText}>{city}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : (
+                <Text style={styles.noResults}>No cities found.</Text>
+              )}
+            </View>
+          </>
+        )}
+      </Modal>
     </View>
   );
 }
@@ -112,7 +209,6 @@ const styles = StyleSheet.create({
   selector: {
     width: "100%",
     maxWidth: 500,
-    position: "relative",
   },
 
   inputContainer: {
@@ -122,6 +218,10 @@ const styles = StyleSheet.create({
     borderColor: "#ccc",
     borderRadius: 10,
     backgroundColor: "#fff",
+  },
+
+  modalInputContainer: {
+    position: "absolute",
   },
 
   inputContainerDisabled: {
@@ -135,6 +235,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
 
+  closedInputPressable: {
+    flex: 1,
+    paddingHorizontal: 15,
+    paddingVertical: 14,
+  },
+
+  closedInputText: {
+    fontSize: 16,
+    color: "#000",
+  },
+
+  closedInputPlaceholder: {
+    color: "#999",
+  },
+
   clearSmallButton: {
     paddingHorizontal: 15,
   },
@@ -146,15 +261,16 @@ const styles = StyleSheet.create({
 
   dropdown: {
     position: "absolute",
-    top: 55,
-    left: 0,
-    right: 0,
-    maxHeight: 220,
+    maxHeight: DROPDOWN_MAX_HEIGHT,
     borderWidth: 1,
     borderColor: "#ddd",
     borderRadius: 10,
     backgroundColor: "#fff",
     overflow: "hidden",
+  },
+
+  dropdownScroll: {
+    maxHeight: DROPDOWN_MAX_HEIGHT,
   },
 
   dropdownItem: {
