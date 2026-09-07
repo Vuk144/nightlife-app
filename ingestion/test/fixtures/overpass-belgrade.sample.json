@@ -1,0 +1,108 @@
+{
+  "version": 0.6,
+  "generator": "test-fixture (not real Overpass output)",
+  "elements": [
+    {
+      "type": "node",
+      "id": 1001,
+      "lat": 44.8185,
+      "lon": 20.4884,
+      "tags": {
+        "amenity": "nightclub",
+        "name": "Drugstore",
+        "addr:street": "Bulevar despota Stefana",
+        "addr:housenumber": "115",
+        "addr:postcode": "11000",
+        "addr:city": "Beograd",
+        "website": "https://example.org/drugstore",
+        "opening_hours": "Fr-Sa 23:00-06:00",
+        "wikidata": "Q3040577"
+      }
+    },
+    {
+      "type": "way",
+      "id": 41234985,
+      "center": { "lat": 44.8106, "lon": 20.4657 },
+      "tags": {
+        "amenity": "arts_centre",
+        "name": "Dom omladine Beograda",
+        "wikidata": "Q4882656",
+        "building": "yes"
+      }
+    },
+    {
+      "type": "relation",
+      "id": 3003,
+      "center": { "lat": 44.82, "lon": 20.46 },
+      "tags": { "club": "music", "name": "KST" }
+    },
+    {
+      "type": "node",
+      "id": 4004,
+      "lat": 44.805,
+      "lon": 20.4762,
+      "tags": { "amenity": "nightclub" }
+    },
+    {
+      "type": "node",
+      "id": 5005,
+      "tags": { "amenity": "nightclub", "name": "No Coordinates Club" }
+    },
+    {
+      "type": "node",
+      "id": 6006,
+      "lat": 44.8,
+      "lon": 20.45,
+      "tags": { "amenity": "restaurant", "name": "Ordinary Restaurant", "cuisine": "italian" }
+    },
+    {
+      "type": "node",
+      "id": 7007,
+      "lat": 44.807,
+      "lon": 20.452,
+      "tags": { "amenity": "restaurant", "name": "Kafana Question Mark", "cuisine": "serbian" }
+    },
+    {
+      "type": "node",
+      "id": 8008,
+      "lat": 44.809,
+      "lon": 20.458,
+      "tags": { "amenity": "bar", "name": "Random Cocktail Bar" }
+    },
+    {
+      "type": "node",
+      "id": 9009,
+      "lat": 44.812,
+      "lon": 20.462,
+      "tags": { "amenity": "theatre", "theatre:type": "concert_hall", "name": "City Concert Hall" }
+    },
+    {
+      "type": "node",
+      "id": 1010,
+      "lat": 44.813,
+      "lon": 20.463,
+      "tags": { "amenity": "cafe", "bar": "yes", "name": "Rocket Coffee" }
+    },
+    {
+      "type": "node",
+      "id": 1011,
+      "lat": 44.814,
+      "lon": 20.464,
+      "tags": { "amenity": "restaurant", "name": "Splav Sunset Cocktail Bar" }
+    },
+    {
+      "type": "node",
+      "id": 1013,
+      "lat": 44.816,
+      "lon": 20.466,
+      "tags": { "amenity": "restaurant", "name": "Splav Riblji Restoran" }
+    },
+    {
+      "type": "node",
+      "id": 1012,
+      "lat": 44.815,
+      "lon": 20.465,
+      "tags": { "amenity": "bar", "name:sr": "Кафић без имена" }
+    }
+  ]
+}

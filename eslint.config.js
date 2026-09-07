@@ -5,6 +5,7 @@ const expoConfig = require('eslint-config-expo/flat');
 module.exports = defineConfig([
   expoConfig,
   {
-    ignores: ['dist/*'],
+    // `ingestion/` is a standalone Node project with its own toolchain.
+    ignores: ['dist/*', 'ingestion/**'],
   },
 ]);

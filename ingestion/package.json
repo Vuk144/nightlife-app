@@ -1,0 +1,25 @@
+{
+  "name": "nightlife-ingestion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone data-ingestion runner for the nightlife app. Writes to Supabase with the service-role key. Never imported by or bundled into the Expo app.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "ingest": "tsx src/index.ts",
+    "ingest:dry": "tsx src/index.ts --dry-run",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.109.0",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "~6.0.3"
+  }
+}
