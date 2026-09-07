@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import * as Location from "expo-location";
 
@@ -19,7 +19,39 @@ import MusicSelector from "@/components/MusicSelector";
 
 import { countries } from "@/constants/locations";
 import { musicGenres } from "@/constants/nightlifeData";
+import { getRoadDistances, type Coordinates } from "@/lib/routing";
 import { fetchVenues, type Venue } from "@/lib/venues";
+
+// Minimum GPS movement (meters) before we bother re-requesting road
+// distances for the currently displayed results. Standard Haversine
+// great-circle distance — no dependency needed.
+const ROUTING_THRESHOLD_METERS = 50;
+
+function haversineDistanceMeters(a: Coordinates, b: Coordinates): number {
+  const EARTH_RADIUS_METERS = 6371000;
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+
+  const deltaLat = toRadians(b.latitude - a.latitude);
+  const deltaLng = toRadians(b.longitude - a.longitude);
+
+  const lat1 = toRadians(a.latitude);
+  const lat2 = toRadians(b.latitude);
+
+  const haversine =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) ** 2;
+
+  return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(haversine));
+}
+
+// Display-only formatting — the underlying value stays exact meters
+// everywhere else (sorting included).
+function formatDistance(meters: number): string {
+  if (meters < 1000) {
+    return `${Math.round(meters)} m away`;
+  }
+  return `${(meters / 1000).toFixed(1)} km away`;
+}
 
 export default function HomeScreen() {
   const [selectedCountry, setSelectedCountry] = useState("");
@@ -41,13 +73,26 @@ export default function HomeScreen() {
     "country" | "city" | "music" | null
   >(null);
 
-  const [coords, setCoords] = useState<{
-    latitude: number;
-    longitude: number;
-  } | null>(null);
+  const [coords, setCoords] = useState<Coordinates | null>(null);
   const [locationStatus, setLocationStatus] = useState<
     "loading" | "granted" | "denied" | "error"
   >("loading");
+
+  const [distancesByVenueId, setDistancesByVenueId] = useState<
+    Record<string, number>
+  >({});
+  const [routingStatus, setRoutingStatus] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
+  // True once the current `results` either don't need routing (no GPS yet,
+  // or no matches) or their first routing attempt has resolved (success or
+  // failure) — gates showing the result cards so they don't appear first
+  // and get their distance filled in a moment later. Stays true across
+  // later GPS-triggered re-routes of the same result set (live updates),
+  // and only goes back to false when a new search starts.
+  const [resultsReady, setResultsReady] = useState(true);
+  // TEMP DEBUG — remove after diagnosing the real-device failure.
+  const [routingErrorDetail, setRoutingErrorDetail] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +159,101 @@ export default function HomeScreen() {
       cancelled = true;
     };
   }, []);
+
+  // Road-distance routing for the currently filtered results. Throttled to
+  // at most one OSRM call per 50m of GPS movement for the same result set;
+  // a new result set (filters changed, new search) always routes at least
+  // once regardless of how far the GPS has moved. Both refs are updated the
+  // moment a request is *attempted*, not just on success — otherwise a
+  // failed request would keep looking like an untried "new" result set and
+  // trigger a fresh OSRM call on every subsequent GPS update. A genuine
+  // retry after a failure is still governed by the 50m threshold, measured
+  // from wherever that failed attempt was made.
+  const lastAttemptedLocationRef = useRef<Coordinates | null>(null);
+  const lastAttemptedResultsRef = useRef<Venue[] | null>(null);
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    if (!coords || results.length === 0) {
+      // Nothing to route (no GPS yet, or no matches). resultsReady was
+      // already resolved by handleSearch when this search started, so
+      // there's nothing to do here — just don't kick off a request.
+      return;
+    }
+
+    const isNewResultSet = lastAttemptedResultsRef.current !== results;
+    const hasMovedEnough =
+      lastAttemptedLocationRef.current !== null &&
+      haversineDistanceMeters(coords, lastAttemptedLocationRef.current) >=
+        ROUTING_THRESHOLD_METERS;
+
+    const shouldRoute =
+      lastAttemptedLocationRef.current === null ||
+      isNewResultSet ||
+      hasMovedEnough;
+
+    if (!shouldRoute) {
+      return;
+    }
+
+    lastAttemptedLocationRef.current = coords;
+    lastAttemptedResultsRef.current = results;
+
+    // requestIdRef alone is the staleness guard — it only advances when a
+    // request is actually (re-)started above, unlike an effect-cleanup
+    // "cancelled" flag, which would also fire on every GPS tick that
+    // *doesn't* start a new request and wrongly discard a still-in-flight
+    // one's result.
+    const requestId = ++requestIdRef.current;
+    setRoutingStatus("loading");
+    setRoutingErrorDetail(""); // TEMP DEBUG
+    // A new request has started: drop any distances already on screen so a
+    // stale, previous-location/previous-result-set distance can never be
+    // shown as if it were calculated from the current GPS location.
+    setDistancesByVenueId({});
+
+    getRoadDistances(coords, results).then((result) => {
+      if (requestId !== requestIdRef.current) return;
+
+      // First attempt for these results has resolved (success or failure)
+      // — safe to reveal the cards now. A no-op if they were already
+      // visible (e.g. this is a live re-route after GPS movement).
+      setResultsReady(true);
+
+      if (result.ok) {
+        setDistancesByVenueId(result.distancesByVenueId);
+        setRoutingStatus("idle");
+      } else {
+        // TEMP DEBUG — remove after diagnosing the real-device failure.
+        console.error("[routing] getRoadDistances failed:", result.error);
+        setRoutingErrorDetail(result.error);
+        setRoutingStatus("error");
+      }
+    });
+  }, [coords, results]);
+
+  // The list actually rendered: results with a distance attached where one
+  // is known (never invented), sorted nearest first — venues with no known
+  // distance are kept, in their existing order, at the end. Sorting compares
+  // the raw meters from distancesByVenueId, not the rounded display value,
+  // so venues that round to the same 0.1 km still order correctly.
+  const sortedResults = useMemo(() => {
+    return [...results]
+      .map((venue) => {
+        const meters = distancesByVenueId[venue.id];
+
+        return meters === undefined ? venue : { ...venue, distance: meters };
+      })
+      .sort((a, b) => {
+        const metersA = distancesByVenueId[a.id];
+        const metersB = distancesByVenueId[b.id];
+
+        if (metersA === undefined && metersB === undefined) return 0;
+        if (metersA === undefined) return 1;
+        if (metersB === undefined) return -1;
+        return metersA - metersB;
+      });
+  }, [results, distancesByVenueId]);
 
   function closeSelector() {
     setOpenSelector(null);
@@ -238,6 +378,12 @@ export default function HomeScreen() {
 
     setResults(filteredVenues);
     setShowResults(true);
+    // Block the cards until this new result set's first routing attempt
+    // resolves — but only when there's actually a request to wait for:
+    // there are matches AND we have a GPS fix to route from. With no
+    // matches, or no coordinates yet, there's nothing to wait on so the
+    // cards can show immediately.
+    setResultsReady(filteredVenues.length === 0 || coords === null);
   }
 
   return (
@@ -338,29 +484,45 @@ export default function HomeScreen() {
         <View style={styles.resultsBox}>
           <Text style={styles.resultsTitle}>Search results</Text>
 
-          {results.length > 0 ? (
-            results.map((venue) => (
-              <View key={venue.id} style={styles.venueCard}>
-                <Text style={styles.venueName}>{venue.name}</Text>
-
-                <Text style={styles.venueText}>
-                  🎵 {venue.musicGenres.join(", ")}
-                </Text>
-
-                <Text style={styles.venueText}>
-                  🕐 Open until {venue.closingTime}
-                </Text>
-
-                {venue.distance !== undefined && (
-                  <Text style={styles.venueText}>📍 {venue.distance} km</Text>
-                )}
-              </View>
-            ))
-          ) : (
-            <Text style={styles.resultsText}>
-              No places match your search.
-            </Text>
+          {routingStatus === "loading" && (
+            <Text style={styles.statusText}>Calculating distances…</Text>
           )}
+
+          {routingStatus === "error" && (
+            <Text style={styles.errorText}>Couldn&apos;t calculate distances.</Text>
+          )}
+
+          {/* TEMP DEBUG — remove after diagnosing the real-device failure. */}
+          {routingErrorDetail !== "" && (
+            <Text style={styles.errorText}>DEBUG: {routingErrorDetail}</Text>
+          )}
+
+          {resultsReady &&
+            (sortedResults.length > 0 ? (
+              sortedResults.map((venue) => (
+                <View key={venue.id} style={styles.venueCard}>
+                  <Text style={styles.venueName}>{venue.name}</Text>
+
+                  <Text style={styles.venueText}>
+                    🎵 {venue.musicGenres.join(", ")}
+                  </Text>
+
+                  <Text style={styles.venueText}>
+                    🕐 Open until {venue.closingTime}
+                  </Text>
+
+                  {venue.distance !== undefined && (
+                    <Text style={styles.venueText}>
+                      📍 {formatDistance(venue.distance)}
+                    </Text>
+                  )}
+                </View>
+              ))
+            ) : (
+              <Text style={styles.resultsText}>
+                No places match your search.
+              </Text>
+            ))}
         </View>
       )}
     </ScrollView>
