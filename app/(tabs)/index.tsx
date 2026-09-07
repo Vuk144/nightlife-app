@@ -175,9 +175,9 @@ export default function HomeScreen() {
 
   useEffect(() => {
     if (!coords || results.length === 0) {
-      // Nothing to route (no GPS yet, or no matches) — don't block the
-      // cards on a routing attempt that isn't going to happen.
-      setResultsReady(true);
+      // Nothing to route (no GPS yet, or no matches). resultsReady was
+      // already resolved by handleSearch when this search started, so
+      // there's nothing to do here — just don't kick off a request.
       return;
     }
 
@@ -379,9 +379,11 @@ export default function HomeScreen() {
     setResults(filteredVenues);
     setShowResults(true);
     // Block the cards until this new result set's first routing attempt
-    // resolves — unless there's nothing to route (no matches), in which
-    // case there's nothing to wait for.
-    setResultsReady(filteredVenues.length === 0);
+    // resolves — but only when there's actually a request to wait for:
+    // there are matches AND we have a GPS fix to route from. With no
+    // matches, or no coordinates yet, there's nothing to wait on so the
+    // cards can show immediately.
+    setResultsReady(filteredVenues.length === 0 || coords === null);
   }
 
   return (
