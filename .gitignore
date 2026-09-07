@@ -34,6 +34,13 @@ yarn-error.*
 .env
 .env*.local
 
+# ingestion workspace — never track its secrets or dependencies
+ingestion/node_modules/
+ingestion/.env
+ingestion/.env.local
+ingestion/.env*.local
+ingestion/dist/
+
 # typescript
 *.tsbuildinfo
 
