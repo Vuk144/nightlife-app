@@ -10,8 +10,9 @@
   "scripts": {
     "ingest": "tsx src/index.ts",
     "ingest:dry": "tsx src/index.ts --dry-run",
+    "ingest:events:dry": "tsx src/events/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test \"test/*.test.ts\""
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.109.0",
