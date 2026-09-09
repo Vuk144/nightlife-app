@@ -81,6 +81,45 @@ const CONFIDENCE_RANK: Record<EventVenueResolution["locationConfidence"], number
   { coordinates: 3, address: 2, "city-only": 1, none: 0 };
 
 /**
+ * Total-order code-unit (UTF-16) string compare -> -1 | 0 | 1. Deliberately NOT
+ * `localeCompare`, which can rank two distinct strings equal and would make the
+ * sort — and therefore the per-run cap's safe/demoted selection — depend on
+ * input order.
+ */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Deterministic order in which contributions are folded into a candidate: by
+ * event URL, then event title. Every "first wins" / "first non-null wins" merge
+ * (proposedName, city, address, coordinates, provenance, the first five
+ * exampleEvents) is anchored to this order, never to arrival order.
+ */
+function compareContributionOrder(
+  a: EventVenueResolution,
+  b: EventVenueResolution,
+): number {
+  return (
+    byCodeUnit(a.event.url, b.event.url) || byCodeUnit(a.event.title, b.event.title)
+  );
+}
+
+/**
+ * Final candidate ordering: most events first, then city, then normalized name,
+ * then the unique `candidateKey` as a guaranteed total-order tiebreak so the
+ * cap keeps the same candidates safe regardless of input order.
+ */
+function compareCandidates(a: EventFirstCandidate, b: EventFirstCandidate): number {
+  return (
+    b.eventCount - a.eventCount ||
+    (a.city ?? "").localeCompare(b.city ?? "") ||
+    a.normalizedName.localeCompare(b.normalizedName) ||
+    byCodeUnit(a.candidateKey, b.candidateKey)
+  );
+}
+
+/**
  * @param resolutions   every per-event resolution from the run
  * @param options.maxNewVenues  per-run cap on `safe_new_venue` candidates
  */
@@ -88,25 +127,12 @@ export function aggregateEventFirstCandidates(
   resolutions: EventVenueResolution[],
   options: { maxNewVenues: number },
 ): EventFirstAggregate {
-  // Aggregate contributions in a DETERMINISTIC order — by event URL, then title —
-  // never in arrival order. Every "first wins" / "first non-null wins" merge
-  // below (proposedName, city, address, coordinates, provenance, and the first
-  // five exampleEvents) is therefore anchored to the same order no matter how
-  // the caller passed the resolutions in. `.filter` returns a fresh array, so
-  // the `.sort` never touches the caller's `resolutions`.
+  // Fold contributions in `compareContributionOrder` (URL, then title) — never
+  // arrival order — so every "first wins" merge below is deterministic. `.filter`
+  // returns a fresh array, so `.sort` never touches the caller's `resolutions`.
   const relevant = resolutions
     .filter((r) => r.status === "safe_new_venue" || r.status === "needs_review")
-    .sort((a, b) =>
-      a.event.url < b.event.url
-        ? -1
-        : a.event.url > b.event.url
-          ? 1
-          : a.event.title < b.event.title
-            ? -1
-            : a.event.title > b.event.title
-              ? 1
-              : 0,
-    );
+    .sort(compareContributionOrder);
 
   const byKey = new Map<string, EventFirstCandidate>();
   for (const r of relevant) {
@@ -177,17 +203,7 @@ export function aggregateEventFirstCandidates(
     mergeCoords(existing, r);
   }
 
-  const candidates = [...byKey.values()].sort(
-    (a, b) =>
-      b.eventCount - a.eventCount ||
-      (a.city ?? "").localeCompare(b.city ?? "") ||
-      a.normalizedName.localeCompare(b.normalizedName) ||
-      // Guaranteed total order: `candidateKey` is unique per candidate (it is the
-      // Map key). A plain code-unit compare — never `localeCompare`, which can
-      // rank two distinct strings equal — so the sort, and therefore the cap's
-      // safe/demoted selection, is fully independent of input order.
-      (a.candidateKey < b.candidateKey ? -1 : a.candidateKey > b.candidateKey ? 1 : 0),
-  );
+  const candidates = [...byKey.values()].sort(compareCandidates);
 
   // Per-run cap: the first N safe candidates (most events first) stay safe;
   // the rest are demoted to needs_review — never silently dropped.

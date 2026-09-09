@@ -370,8 +370,18 @@ test("[e2e] discovery order does not change the result (determinism)", async () 
 test("[e2e] a second identical run is byte-for-byte identical (report determinism)", async () => {
   const a = await runPipeline(SITEMAP_ENTRIES);
   const b = await runPipeline(SITEMAP_ENTRIES);
+
+  // `stats.durationMs` is a wall-clock measurement and is the one field in the
+  // report that legitimately differs between two runs (it renders as `(0.0s)` /
+  // `(0.1s)`). Normalize it — as the discovery-order determinism test above
+  // already does — so this stays a report-*content* determinism check.
+  const stripDuration = (r: Awaited<ReturnType<typeof runPipeline>>["report"]) => ({
+    ...r,
+    stats: { ...r.stats, durationMs: 0 },
+  });
+
   assert.equal(
-    formatReport(a.report, { verbose: true }),
-    formatReport(b.report, { verbose: true }),
+    formatReport(stripDuration(a.report), { verbose: true }),
+    formatReport(stripDuration(b.report), { verbose: true }),
   );
 });
