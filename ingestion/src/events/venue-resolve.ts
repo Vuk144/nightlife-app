@@ -22,7 +22,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { findAlias } from "../aliases.ts";
-import { resolveMatch } from "../matching.ts";
+import { resolveMatch, type MatchOutcome } from "../matching.ts";
 import { computeNameNormalized } from "../name.ts";
 import type { ExistingVenue, NormalizedVenue } from "../types.ts";
 import type { NormalizedEvent, SourceVenue } from "./types.ts";
@@ -182,6 +182,77 @@ function shareToken(a: string, b: string): boolean {
   return a.split(" ").some((t) => t.length > 1 && bt.has(t));
 }
 
+/** Partial handed straight to `make()` for a rejection / early-exit branch. */
+type ResolutionPartial = Partial<EventVenueResolution> &
+  Pick<EventVenueResolution, "status" | "reasonCode" | "reason" | "reasonCodes">;
+
+/**
+ * The name gate: a placeholder / non-venue name, a name that normalizes to
+ * nothing, or a name too short to be real. Returns the rejection partial (fed
+ * straight to `make()`), or null when the name is usable. Order matters:
+ * placeholder, then empty-normalized, then too-short.
+ */
+function nameRejection(
+  name: string,
+  normalizedName: string,
+): ResolutionPartial | null {
+  const ph = placeholderCode(name);
+  if (ph) {
+    return {
+      status: "rejected",
+      reasonCode: ph,
+      reason: `venue name "${name}" is a placeholder / non-venue`,
+      reasonCodes: [ph],
+      locationConfidence: "none",
+    };
+  }
+  if (!normalizedName) {
+    return {
+      status: "rejected",
+      reasonCode: "empty-normalized-name",
+      reason: "venue name normalizes to nothing",
+      reasonCodes: ["empty-normalized-name"],
+      locationConfidence: "none",
+    };
+  }
+  if (name.length < 2) {
+    return {
+      status: "rejected",
+      reasonCode: "name-too-short",
+      reason: `venue name "${name}" is too short`,
+      reasonCodes: ["name-too-short"],
+      locationConfidence: "none",
+    };
+  }
+  return null;
+}
+
+/**
+ * Best location we can attribute to a NEW venue: the source's own venue page
+ * (`enriched`) wins over the event's inline fields; coordinates count only as a
+ * complete lat/lon pair.
+ */
+function assessLocation(
+  event: NormalizedEvent,
+  enriched: SourceVenue | null,
+): Pick<
+  EventVenueResolution,
+  "address" | "latitude" | "longitude" | "coordinatesSource" | "locationConfidence"
+> {
+  const address = enriched?.address ?? event.venue.address ?? null;
+  const latitude = enriched?.latitude ?? event.venue.lat ?? null;
+  const longitude = enriched?.longitude ?? event.venue.lon ?? null;
+  const coordinatesSource: "source" | null =
+    latitude != null && longitude != null ? "source" : null;
+  const locationConfidence: LocationConfidence =
+    latitude != null && longitude != null
+      ? "coordinates"
+      : address
+        ? "address"
+        : "city-only";
+  return { address, latitude, longitude, coordinatesSource, locationConfidence };
+}
+
 export async function createVenueResolver(
   supabase: SupabaseClient,
   options: VenueResolverOptions,
@@ -268,113 +339,27 @@ export async function createVenueResolver(
     return `url:${cityPart}`;
   }
 
-  async function resolve(
+  /**
+   * Is the event's venue an EXISTING venue in `cityRow`?
+   *
+   * Pass 1 matches on name / identifier (`resolveMatch`, Tiers 0-2, no
+   * coordinates). If that is not a clean match, the source's own venue page is
+   * fetched (`enrich`, cached, best-effort) and — when its name is trustworthy
+   * (shares a token with the event's venue name, or a curated alias links them)
+   * — a Pass 2 re-match runs with the page's confirmed name + coordinates so
+   * Tier 3's proximity guard can fire. Pass 2 is adopted only if it is a clean
+   * match. The matcher (`../matching.ts`) is reused UNCHANGED.
+   *
+   * Returns the final matcher outcome plus the enrichment (the new-venue branch
+   * still needs it for location + provenance).
+   */
+  async function matchExisting(
     event: NormalizedEvent,
-    relevanceTier: "primary" | "secondary",
-  ): Promise<EventVenueResolution> {
-    const name = event.venue.name.trim();
-    const normalizedName = computeNameNormalized(name);
-    const sourceVenueId = event.venue.sourceVenueId ?? null;
-    const cityRow = deriveCity(event);
-    const generic = isGenericName(normalizedName);
-
-    const citySlug = (event.reported as { citySlug?: unknown }).citySlug;
-    // The city component of a candidate's identity: the resolved canonical city
-    // name, else the NORMALIZED raw city text — so two un-enriched "Klub X" in
-    // two DIFFERENT unknown cities are not collapsed into one `nc:?:klub x`
-    // candidate by event-first aggregation.
-    const rawCityText =
-      event.venue.city?.trim() || (typeof citySlug === "string" ? citySlug.trim() : "") || "";
-    const cityKeyName =
-      cityRow?.name ?? (rawCityText ? computeNameNormalized(rawCityText) : null);
-
-    // A single builder so every branch returns the same shape.
-    const make = (
-      partial: Partial<EventVenueResolution> &
-        Pick<EventVenueResolution, "status" | "reasonCode" | "reason" | "reasonCodes">,
-    ): EventVenueResolution => ({
-      proposedName: name,
-      normalizedName,
-      city: cityRow?.name ?? null,
-      cityKnown: cityRow != null,
-      cityEnabled: cityRow != null && enabledCities.includes(cityRow.name),
-      address: event.venue.address ?? null,
-      latitude: null,
-      longitude: null,
-      coordinatesSource: null,
-      sourceVenueId,
-      locationConfidence: event.venue.address ? "address" : "city-only",
-      matchedVenueId: null,
-      matchTier: null,
-      matchNote: null,
-      eventRelevanceTier: relevanceTier,
-      provenance: {
-        dataSource: options.sourceKey,
-        externalVenueId: sourceVenueId,
-        sourceUrl: event.sourceUrl,
-        venuePageUrl: null,
-      },
-      candidateKey: candidateKey(
-        normalizedName,
-        cityKeyName,
-        sourceVenueId,
-        event.venue.address ?? null,
-        generic,
-      ),
-      event: { title: event.title, url: event.sourceUrl },
-      ...partial,
-    });
-
-    // 0. placeholder / non-venue / online
-    const ph = placeholderCode(name);
-    if (ph) {
-      return make({
-        status: "rejected",
-        reasonCode: ph,
-        reason: `venue name "${name}" is a placeholder / non-venue`,
-        reasonCodes: [ph],
-        locationConfidence: "none",
-      });
-    }
-    if (!normalizedName) {
-      return make({
-        status: "rejected",
-        reasonCode: "empty-normalized-name",
-        reason: "venue name normalizes to nothing",
-        reasonCodes: ["empty-normalized-name"],
-        locationConfidence: "none",
-      });
-    }
-    if (name.length < 2) {
-      return make({
-        status: "rejected",
-        reasonCode: "name-too-short",
-        reason: `venue name "${name}" is too short`,
-        reasonCodes: ["name-too-short"],
-        locationConfidence: "none",
-      });
-    }
-
-    // 1. city
-    if (!event.venue.city && typeof citySlug !== "string") {
-      return make({
-        status: "rejected",
-        reasonCode: "city-missing",
-        reason: "no city information in the event source",
-        reasonCodes: ["city-missing"],
-        locationConfidence: "none",
-      });
-    }
-    if (!cityRow) {
-      return make({
-        status: "needs_review",
-        reasonCode: "city-unknown",
-        reason: `city "${event.venue.city ?? citySlug}" is not in the venue database`,
-        reasonCodes: ["city-unknown"],
-      });
-    }
-
-    // 2. existing match (per-city; matcher + aliases reused UNCHANGED)
+    name: string,
+    normalizedName: string,
+    sourceVenueId: string | null,
+    cityRow: CityRow,
+  ): Promise<{ outcome: MatchOutcome; enriched: SourceVenue | null }> {
     const existing = venuesByCity.get(cityRow.id) ?? [];
     const matchCtx = {
       target: {
@@ -423,6 +408,139 @@ export async function createVenueResolver(
       }
     }
 
+    return { outcome, enriched };
+  }
+
+  /**
+   * For a NEW event-first venue: every reason a human should look before it
+   * could be auto-created, gathered in a FIXED order (the first is the headline
+   * `reasonCode`; an empty result means `safe_new_venue`):
+   *
+   *   matcher-flagged-review, source-not-trusted, city-not-enabled,
+   *   secondary-relevance-only, generic-venue-name, coordinates-out-of-region,
+   *   venue-page-city-mismatch, location-confidence-insufficient
+   */
+  function reviewCodesFor(args: {
+    matcherFlaggedReview: boolean;
+    cityRow: CityRow;
+    relevanceTier: "primary" | "secondary";
+    generic: boolean;
+    location: ReturnType<typeof assessLocation>;
+    enriched: SourceVenue | null;
+  }): string[] {
+    const codes: string[] = [];
+    if (args.matcherFlaggedReview) codes.push("matcher-flagged-review");
+    if (!options.sourceTrusted) codes.push("source-not-trusted");
+    if (!enabledCities.includes(args.cityRow.name)) codes.push("city-not-enabled");
+    if (args.relevanceTier !== "primary") codes.push("secondary-relevance-only");
+    if (args.generic) codes.push("generic-venue-name");
+
+    const { latitude, longitude, locationConfidence } = args.location;
+    if (latitude != null && longitude != null && !inSerbiaBox(latitude, longitude)) {
+      codes.push("coordinates-out-of-region");
+    }
+    if (args.enriched?.city) {
+      // The venue page names a city. If it does not resolve to the SAME city the
+      // event resolved to — a *different* known city, OR a city we have no row
+      // for at all — the page and the event disagree about where this venue is:
+      // never silently `safe_new_venue`.
+      const enrichedCity = matchCityText(args.enriched.city);
+      if (!enrichedCity || enrichedCity.id !== args.cityRow.id) {
+        codes.push("venue-page-city-mismatch");
+      }
+    }
+    if (locationConfidence === "city-only") {
+      codes.push("location-confidence-insufficient");
+    }
+    return codes;
+  }
+
+  async function resolve(
+    event: NormalizedEvent,
+    relevanceTier: "primary" | "secondary",
+  ): Promise<EventVenueResolution> {
+    const name = event.venue.name.trim();
+    const normalizedName = computeNameNormalized(name);
+    const sourceVenueId = event.venue.sourceVenueId ?? null;
+    const cityRow = deriveCity(event);
+    const generic = isGenericName(normalizedName);
+
+    const citySlug = (event.reported as { citySlug?: unknown }).citySlug;
+    // The city component of a candidate's identity: the resolved canonical city
+    // name, else the NORMALIZED raw city text — so two un-enriched "Klub X" in
+    // two DIFFERENT unknown cities are not collapsed into one `nc:?:klub x`
+    // candidate by event-first aggregation.
+    const rawCityText =
+      event.venue.city?.trim() || (typeof citySlug === "string" ? citySlug.trim() : "") || "";
+    const cityKeyName =
+      cityRow?.name ?? (rawCityText ? computeNameNormalized(rawCityText) : null);
+
+    // A single builder so every branch returns the same shape.
+    const make = (partial: ResolutionPartial): EventVenueResolution => ({
+      proposedName: name,
+      normalizedName,
+      city: cityRow?.name ?? null,
+      cityKnown: cityRow != null,
+      cityEnabled: cityRow != null && enabledCities.includes(cityRow.name),
+      address: event.venue.address ?? null,
+      latitude: null,
+      longitude: null,
+      coordinatesSource: null,
+      sourceVenueId,
+      locationConfidence: event.venue.address ? "address" : "city-only",
+      matchedVenueId: null,
+      matchTier: null,
+      matchNote: null,
+      eventRelevanceTier: relevanceTier,
+      provenance: {
+        dataSource: options.sourceKey,
+        externalVenueId: sourceVenueId,
+        sourceUrl: event.sourceUrl,
+        venuePageUrl: null,
+      },
+      candidateKey: candidateKey(
+        normalizedName,
+        cityKeyName,
+        sourceVenueId,
+        event.venue.address ?? null,
+        generic,
+      ),
+      event: { title: event.title, url: event.sourceUrl },
+      ...partial,
+    });
+
+    // 0. name gate — placeholder / empty-normalized / too-short
+    const nameRej = nameRejection(name, normalizedName);
+    if (nameRej) return make(nameRej);
+
+    // 1. city — missing (no signal at all) vs unknown (stated, not in our DB)
+    if (!event.venue.city && typeof citySlug !== "string") {
+      return make({
+        status: "rejected",
+        reasonCode: "city-missing",
+        reason: "no city information in the event source",
+        reasonCodes: ["city-missing"],
+        locationConfidence: "none",
+      });
+    }
+    if (!cityRow) {
+      return make({
+        status: "needs_review",
+        reasonCode: "city-unknown",
+        reason: `city "${event.venue.city ?? citySlug}" is not in the venue database`,
+        reasonCodes: ["city-unknown"],
+      });
+    }
+
+    // 2. existing venue? (Pass 1 -> best-effort enrichment -> Pass 2)
+    const { outcome, enriched } = await matchExisting(
+      event,
+      name,
+      normalizedName,
+      sourceVenueId,
+      cityRow,
+    );
+
     if (outcome.kind === "match") {
       return make({
         status: "matched_existing",
@@ -451,44 +569,19 @@ export async function createVenueResolver(
       });
     }
 
-    // 3. event-first candidate — gather every signal, then decide.
-    const codes: string[] = [];
-    if (outcome.review) codes.push("matcher-flagged-review");
-    if (!options.sourceTrusted) codes.push("source-not-trusted");
-    if (!enabledCities.includes(cityRow.name)) codes.push("city-not-enabled");
-    if (relevanceTier !== "primary") codes.push("secondary-relevance-only");
-    if (generic) codes.push("generic-venue-name");
+    // 3. event-first candidate — assess location, gather review reasons, decide.
+    const location = assessLocation(event, enriched);
+    const codes = reviewCodesFor({
+      matcherFlaggedReview: !!outcome.review,
+      cityRow,
+      relevanceTier,
+      generic,
+      location,
+      enriched,
+    });
 
-    // 4. location — from the source's own venue page (fetched above), best-effort
-    const address = enriched?.address ?? event.venue.address ?? null;
-    const latitude = enriched?.latitude ?? event.venue.lat ?? null;
-    const longitude = enriched?.longitude ?? event.venue.lon ?? null;
-    const coordinatesSource: "source" | null =
-      latitude != null && longitude != null ? "source" : null;
-    const locationConfidence: LocationConfidence =
-      latitude != null && longitude != null
-        ? "coordinates"
-        : address
-          ? "address"
-          : "city-only";
-
-    if (latitude != null && longitude != null && !inSerbiaBox(latitude, longitude)) {
-      codes.push("coordinates-out-of-region");
-    }
-    if (enriched?.city) {
-      // The venue page names a city. If it does not resolve to the SAME city the
-      // event resolved to — a *different* known city, OR a city we have no row
-      // for at all — the page and the event disagree about where this venue is:
-      // never silently `safe_new_venue`.
-      const enrichedCity = matchCityText(enriched.city);
-      if (!enrichedCity || enrichedCity.id !== cityRow.id) {
-        codes.push("venue-page-city-mismatch");
-      }
-    }
-    if (locationConfidence === "city-only") {
-      codes.push("location-confidence-insufficient");
-    }
-
+    const { address, latitude, longitude, coordinatesSource, locationConfidence } =
+      location;
     const safe = codes.length === 0;
     return make({
       status: safe ? "safe_new_venue" : "needs_review",
