@@ -14,6 +14,20 @@
  */
 
 import { tokenize } from "./text.ts";
+import {
+  CAT_FESTIVAL,
+  CAT_GENERIC,
+  CAT_MUSIC,
+  CAT_NEWYEAR,
+  CAT_SPORT,
+  CAT_STANDUP,
+  CAT_THEATRE,
+  HARD_NEGATIVE,
+  KIDS,
+  MUSIC_STRONG,
+  NIGHTLIFE_SECONDARY,
+  NON_MUSIC_FESTIVAL,
+} from "./relevance-keywords.ts";
 
 export type RelevanceTier = "primary" | "secondary";
 
@@ -36,170 +50,6 @@ export interface RelevanceInput {
    */
   venueCategory?: string | null;
 }
-
-/** Category slugs whose meaning we rely on. Venue-group cats are ignored. */
-const CAT_MUSIC = "koncert";
-const CAT_FESTIVAL = "festival";
-const CAT_STANDUP = "stand-up";
-const CAT_NEWYEAR = "docek";
-const CAT_THEATRE = "pozoriste";
-const CAT_SPORT = "sport";
-const CAT_GENERIC = "dogadjaj";
-
-/**
- * Hard-negative tokens. If any appears in the title, description or event-type
- * text, the event is rejected outright — these name activities this app does
- * not cover. (Matched as whole tokens after de-accenting, so "sajam" will not
- * fire on a venue name embedded elsewhere — venue text is not scanned here.)
- */
-const HARD_NEGATIVE = new Set<string>([
-  // fairs / expos / trade
-  "sajam",
-  "sajamski",
-  "expo",
-  "bazar",
-  "vasar",
-  // talks / learning
-  "konferencija",
-  "kongres",
-  "samit",
-  "seminar",
-  "predavanje",
-  "radionica",
-  "webinar",
-  "trening",
-  "obuka",
-  // visual / screen / static culture
-  "izlozba",
-  "izlozbe",
-  "postavka",
-  "projekcija",
-  "bioskop",
-  // stage forms that are not nightlife
-  "predstava",
-  "predstave",
-  "opera",
-  "balet",
-  "mjuzikl",
-  "monodrama",
-  "matine",
-  // sport / competition
-  "utakmica",
-  "mec",
-  "turnir",
-  "trka",
-  "maraton",
-  "sampionat",
-  "prvenstvo",
-  "kviz",
-  // kids / other
-  "deciji",
-  "decija",
-  "decji",
-  "decje",
-  // motoring
-  "supercar",
-  "oldtajmer",
-  "reli",
-]);
-
-/**
- * Strong positive music / nightlife tokens. Any one grants PRIMARY (unless a
- * hard-negative already fired).
- */
-const MUSIC_STRONG = new Set<string>([
-  "koncert",
-  "koncerti",
-  "concert",
-  "nastup",
-  "svirka",
-  "svirke",
-  "live",
-  "uzivo",
-  "tribute",
-  "tributes",
-  "orkestar",
-  "orchestra",
-  "bend",
-  "band",
-  "dj",
-  "djs",
-  "b2b",
-  "rave",
-  "techno",
-  "tehno",
-  "house",
-  "trance",
-  "elektronska",
-  "electronic",
-  "clubbing",
-  "soundsystem",
-  "sound",
-  "warmup",
-  "afterparty",
-  "album",
-  "singl",
-  "spot",
-  "turneja",
-  "tour",
-  "unplugged",
-  "acoustic",
-  "akusticni",
-  "jam",
-]);
-
-/**
- * Secondary nightlife tokens — accepted at SECONDARY tier (kept, but flagged)
- * when there is no hard-negative and no strong signal.
- */
-const NIGHTLIFE_SECONDARY = new Set<string>([
-  "zurka",
-  "zurke",
-  "party",
-  "partijem",
-  "fest",
-  "festival",
-  "openair",
-  "open",
-  "air",
-  "standup",
-  "stand",
-  "komedija",
-  "kabare",
-  "cabaret",
-  "improvizacija",
-  "docek",
-  "nocna",
-  "noc",
-  "night",
-]);
-
-/** Non-music festival markers — a `festival` that is really something else. */
-const NON_MUSIC_FESTIVAL = new Set<string>([
-  "vina",
-  "vinski",
-  "vino",
-  "wine",
-  "piva",
-  "beer",
-  "hrane",
-  "food",
-  "gastro",
-  "street",
-  "knjiga",
-  "knjizevni",
-  "book",
-  "film",
-  "filmski",
-  "pozorisni",
-  "naucni",
-  "science",
-  "cveca",
-  "turisticki",
-]);
-
-/** Kids-programming markers — reject even for otherwise-accepted secondary cats. */
-const KIDS = new Set<string>(["deciji", "decija", "decji", "decje", "dete", "deca"]);
 
 function hasAny(tokens: Set<string>, against: Set<string>): string | null {
   for (const token of against) {

@@ -20,8 +20,8 @@
  */
 
 import { blockText, collapseWs, inlineText } from "../text.ts";
-import { parseSerbianDateTime } from "../time.ts";
 import type { NormalizedEvent, ParseResult } from "../types.ts";
+import { parseSerbianDateTime } from "./gigstix-datetime.ts";
 import {
   cleanGigstixTitle as cleanTitle,
   firstMatch,
@@ -36,6 +36,54 @@ const NOT_FOUND_MARKERS = [
   "404",
 ];
 
+/**
+ * The GIGS TIX / Event Champ theme's stable hooks: CSS class fragments, the
+ * `<li class="gt-…">` values that identify each detail row, the Serbian field
+ * labels, and the body-class slug prefixes. Anchoring on these — never on
+ * layout position — is what keeps this parser robust. The regexes below
+ * interpolate these fragments; none contains a regex metacharacter.
+ *
+ * NOT here: generic HTML/text helpers (`./gigstix-html.ts`, `../text.ts`), the
+ * bespoke "O događaju" description-section pattern in `extractDescription()`,
+ * and the free-text status-keyword patterns in `detectStatusMarker()`.
+ */
+const GT = {
+  /** Structural class fragments, matched inside `class="… <fragment> …"`. */
+  cls: {
+    detailBox: "gt-content-detail-box",
+    pageContent: "gt-page-content",
+    rowLabel: "gt-title",
+    rowInner: "gt-inner",
+    ticketsPrice: "gt-tickets-price",
+  },
+  /** `<li class="gt-…">` values that identify one detail row. */
+  row: {
+    startDate: "gt-start-date",
+    venue: "gt-venue",
+    city: "gt-locations",
+  },
+  /** Serbian detail-row labels (matched case-insensitively, as a prefix). */
+  label: {
+    date: "datum",
+    endDate: "traje do",
+    venue: "lokacija",
+    city: "mesto",
+    promoter: "organizator",
+    eventType: "vrsta doga",
+  },
+  /** Body/page class prefixes that carry a `-<slug>`. */
+  classPrefix: {
+    category: "eventcat-",
+    location: "location-",
+  },
+  /**
+   * Combined "postponed OR cancelled" category slug. Resolves only to
+   * "postponed" — it must NOT reach the cancellation keyword regex (the slug
+   * literally contains "otkaz").
+   */
+  postponedCategory: "odlozeno-otkazano",
+} as const;
+
 /** Every `<li class="gt-*">` in the detail box, keyed by its label text. */
 interface DetailRow {
   liClass: string;
@@ -45,24 +93,30 @@ interface DetailRow {
 }
 
 function extractDetailRows(html: string): DetailRow[] {
-  const boxStart = html.search(/<div[^>]*class=["'][^"']*gt-content-detail-box/i);
+  const boxStart = html.search(
+    new RegExp(`<div[^>]*class=["'][^"']*${GT.cls.detailBox}`, "i"),
+  );
   const scope = boxStart >= 0 ? html.slice(boxStart, boxStart + 8000) : "";
   if (!scope) return [];
 
   const rows: DetailRow[] = [];
+  // any `<li class="gt-…">` inside the box — the specific row is matched by
+  // `findRow` against GT.row / GT.label
   const liRe = /<li[^>]*class=["'](gt-[^"']*)["'][^>]*>/gi;
+  const labelRe = new RegExp(
+    `<div[^>]*class=["'][^"']*${GT.cls.rowLabel}[^"']*["'][^>]*>([\\s\\S]*?)</div>`,
+    "i",
+  );
+  const innerRe = new RegExp(
+    `<div[^>]*class=["'][^"']*${GT.cls.rowInner}[^"']*["'][^>]*>([\\s\\S]*?)</div>`,
+    "i",
+  );
   let m: RegExpExecArray | null;
   while ((m = liRe.exec(scope)) !== null) {
     const from = m.index;
     const window = scope.slice(from, from + 1600);
-    const label = firstMatch(
-      /<div[^>]*class=["'][^"']*gt-title[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
-      window,
-    );
-    const innerHtml = firstMatch(
-      /<div[^>]*class=["'][^"']*gt-inner[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
-      window,
-    );
+    const label = firstMatch(labelRe, window);
+    const innerHtml = firstMatch(innerRe, window);
     if (label == null && innerHtml == null) continue;
     rows.push({
       liClass: m[1],
@@ -128,7 +182,10 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
 
   const bodyClass = firstMatch(/<body[^>]*class=["']([^"']*)["']/i, clean) ?? "";
   const pageClass =
-    firstMatch(/class=["']([^"']*\bgt-page-content\b[^"']*)["']/i, clean) ?? "";
+    firstMatch(
+      new RegExp(`class=["']([^"']*\\b${GT.cls.pageContent}\\b[^"']*)["']`, "i"),
+      clean,
+    ) ?? "";
   const classSoup = `${bodyClass} ${pageClass}`;
 
   const rawTitle =
@@ -163,26 +220,26 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
   }
 
   const dateRow =
-    findRow(rows, { liClass: "gt-start-date" }) ??
-    findRow(rows, { labelStartsWith: "datum" });
+    findRow(rows, { liClass: GT.row.startDate }) ??
+    findRow(rows, { labelStartsWith: GT.label.date });
   const dateText = dateRow?.innerText ?? "";
   const parsedStart = dateText ? parseSerbianDateTime(dateText) : null;
   if (!parsedStart) {
     return { ok: false, reason: "unparseable-date", detail: dateText || "(no date row)" };
   }
 
-  const endRow = findRow(rows, { labelStartsWith: "traje do" });
+  const endRow = findRow(rows, { labelStartsWith: GT.label.endDate });
   const parsedEnd = endRow ? parseSerbianDateTime(endRow.innerText) : null;
 
   const venueRow =
-    findRow(rows, { liClass: "gt-venue" }) ??
-    findRow(rows, { labelStartsWith: "lokacija" });
+    findRow(rows, { liClass: GT.row.venue }) ??
+    findRow(rows, { labelStartsWith: GT.label.venue });
   const venueName = venueRow ? anchorText(venueRow.innerHtml) : "";
   const venueSlug = venueRow ? slugFrom(venueRow.innerHtml, "venue") : null;
 
   const cityRow =
-    findRow(rows, { liClass: "gt-locations" }) ??
-    findRow(rows, { labelStartsWith: "mesto" });
+    findRow(rows, { liClass: GT.row.city }) ??
+    findRow(rows, { labelStartsWith: GT.label.city });
   const cityText = cityRow ? anchorText(cityRow.innerHtml) : "";
 
   // Some GIGS TIX events name only a city ("Mesto"), no specific venue
@@ -193,9 +250,9 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
   }
   const citySlug =
     (cityRow ? slugFrom(cityRow.innerHtml, "location") : null) ??
-    firstMatch(/\blocation-([a-z0-9-]+)\b/, classSoup);
+    firstMatch(new RegExp(`\\b${GT.classPrefix.location}([a-z0-9-]+)\\b`), classSoup);
 
-  const promoterRow = findRow(rows, { labelStartsWith: "organizator" });
+  const promoterRow = findRow(rows, { labelStartsWith: GT.label.promoter });
   const promoterFull = promoterRow?.innerText || undefined;
   // GIGS TIX sometimes appends the organiser's legal address / registration to
   // the name. Keep the leading name as the canonical value, the full string in
@@ -204,16 +261,18 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
     ? collapseWs(promoterFull.split(/,|\s{2,}| MB \d| PIB \d/)[0])
     : undefined;
 
-  const eventTypeRow = findRow(rows, { labelStartsWith: "vrsta doga" });
+  const eventTypeRow = findRow(rows, { labelStartsWith: GT.label.eventType });
   const eventTypeText = eventTypeRow?.innerText || undefined;
 
   // ---- categories -----------------------------------------------------
-  // From the page-content class list AND from any `/eventcat/<slug>/` links in
-  // the detail rows (the "Vrsta događaja" row), so a page that only carries the
-  // category as a link is still covered.
+  // From the page-content class list (`eventcat-<slug>`) AND from any
+  // `/eventcat/<slug>/` links in the detail rows (the "Vrsta događaja" row), so
+  // a page that only carries the category as a link is still covered.
   const categories = [
     ...new Set([
-      ...Array.from(classSoup.matchAll(/\beventcat-([a-z0-9-]+)\b/g)).map((m) => m[1]),
+      ...Array.from(
+        classSoup.matchAll(new RegExp(`\\b${GT.classPrefix.category}([a-z0-9-]+)\\b`, "g")),
+      ).map((m) => m[1]),
       ...Array.from(clean.matchAll(/\/eventcat\/([a-z0-9-]+)\//g)).map((m) => m[1]),
     ]),
   ];
@@ -227,7 +286,10 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
   const priceText = collapseWs(
     inlineText(
       firstMatch(
-        /<div[^>]*class=["'][^"']*gt-tickets-price[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+        new RegExp(
+          `<div[^>]*class=["'][^"']*${GT.cls.ticketsPrice}[^"']*["'][^>]*>([\\s\\S]*?)</div>`,
+          "i",
+        ),
         clean,
       ) ?? "",
     ),
@@ -239,14 +301,13 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
   const description = extractDescription(clean) ?? ogDescription;
 
   // ---- lifecycle status (explicit signal only; omission is NEVER cancellation) --
-  // Scan the human-readable text only. The `odlozeno-otkazano` category slug is
-  // a combined "postponed OR cancelled" bucket and must NOT be fed to the
-  // cancellation keyword regex (its slug literally contains "otkaz"); the
-  // category on its own resolves to "postponed".
+  // Scan the human-readable text only; the combined postponed/cancelled category
+  // slug (GT.postponedCategory) resolves to "postponed" on its own and must NOT
+  // reach the cancellation keyword regex.
   const marker = detectStatusMarker(`${title}\n${description ?? ""}`);
   const status: NormalizedEvent["status"] =
     marker.status ??
-    (categories.includes("odlozeno-otkazano") ? "postponed" : undefined);
+    (categories.includes(GT.postponedCategory) ? "postponed" : undefined);
 
   const reported = {
     postId: postId ?? null,
