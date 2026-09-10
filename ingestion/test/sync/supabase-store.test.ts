@@ -11,6 +11,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { planSync } from "../../src/sync/engine.ts";
 import { SupabaseCanonicalStore } from "../../src/sync/supabase-store.ts";
+import { eventComparable, venueComparable } from "../../src/sync/store.ts";
+import { hashComparable } from "../../src/sync/canonical-hash.ts";
 import { createInMemoryAdapter } from "../../src/sync/adapters/in-memory.ts";
 import { FakeSupabase } from "./fake-supabase.ts";
 import { CITY_IDS, provider, fakeItem, venueRecord, eventRecord } from "./world.ts";
@@ -989,4 +991,114 @@ test("[dry-run] apply(plan, { commit: false }) issues ZERO database writes", asy
   assert.equal(fake.tables.venues.length, 0);
   assert.equal(fake.tables.data_sources.length, 0, "dry-run does not even resolve/create the source");
   assert.ok(res.notes.some((n) => /dry apply/.test(n)));
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+//  BUG-FIX REGRESSIONS (supabase-store audit step)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── BUG 1: postponed / rescheduled flatten-to-scheduled recorded on UPDATE too ──
+for (const status of ["postponed", "rescheduled"] as const) {
+  test(`[status] an UPDATE carrying status "${status}" records the SAME flatten-to-scheduled deferral as INSERT does`, async () => {
+    const fake = new FakeSupabase();
+    seedTvornica(fake);
+    const s = store(fake);
+
+    // r1: a plain scheduled INSERT — no flatten deferral
+    const r1 = await runEvent(s, eventItem({ title: "Night", status: "scheduled" }), "r1");
+    assert.equal(r1.res.inserted, 1);
+    assert.ok(!r1.res.deferred.some((d) => /flattened to scheduled/.test(d)));
+
+    // r2: a real comparable change (title) makes the op an UPDATE, and the
+    // snapshot now carries status=<status>.
+    const r2 = await runEvent(s, eventItem({ title: "Night — new time", status }), "r2");
+    assert.equal(r2.up.operation, "update");
+    assert.equal(r2.res.updated, 1);
+    assert.ok(
+      r2.res.deferred.some((d) => new RegExp(`status "${status}" flattened to scheduled — current schema only has is_cancelled`).test(d)),
+      `expected the flatten deferral on UPDATE, got: ${JSON.stringify(r2.res.deferred)}`,
+    );
+
+    // cancellation monotonicity is untouched; what the schema CAN store is stored
+    const row = fake.tables.events[0];
+    assert.equal(row.is_cancelled, false, `"${status}" must never persist as cancelled`);
+    assert.equal(row.title, "Night — new time");
+  });
+}
+
+test("[status] a cancelled UPDATE still persists is_cancelled and emits NO flatten deferral", async () => {
+  const fake = new FakeSupabase();
+  seedTvornica(fake);
+  const s = store(fake);
+  await runEvent(s, eventItem({ title: "Night", status: "scheduled" }), "r1");
+  const r2 = await runEvent(s, eventItem({ title: "Night", status: "cancelled" }), "r2");
+  assert.equal(fake.tables.events[0].is_cancelled, true);
+  assert.ok(!r2.res.deferred.some((d) => /flattened to scheduled/.test(d)));
+});
+
+// ── BUG 2: synthesized SourceLink must carry the persisted source_url ──
+test("[provenance] getSourceLink / listSourceLinks preserve a VENUE's persisted source_url (not hardcoded null)", async () => {
+  const fake = new FakeSupabase();
+  seedGeography(fake);
+  const s = store(fake);
+  await runVenue(
+    s,
+    { sourceKey: "sync-test", externalId: "v-1", name: "Depo", closingTime: "03:00", sourceUrl: "https://src.example/v-1" },
+    "r1",
+  );
+  const row = (await s.getVenueBySource("sync-test", "v-1"))!;
+
+  const gl = (await s.getSourceLink("venue", "sync-test", "v-1"))!;
+  assert.equal(gl.sourceUrl, "https://src.example/v-1");
+  // source_url is provenance metadata — it must NOT enter the content hash
+  assert.equal(gl.contentHash, hashComparable(venueComparable(row)));
+  assert.ok(!("sourceUrl" in gl.comparableFields), "sourceUrl is not a comparable field");
+  assert.ok(!("source_url" in gl.comparableFields));
+
+  const [ll] = await s.listSourceLinks("venue", "sync-test");
+  assert.equal(ll.sourceUrl, "https://src.example/v-1");
+  assert.equal(ll.contentHash, hashComparable(venueComparable(row)));
+});
+
+test("[provenance] getSourceLink / listSourceLinks preserve an EVENT's persisted source_url (not hardcoded null)", async () => {
+  const fake = new FakeSupabase();
+  seedTvornica(fake);
+  const s = store(fake);
+  await runEvent(s, eventItem({ title: "DJ Night", sourceUrl: "https://src.example/E1" }), "r1");
+  const row = (await s.getEventBySource("entrio-hr", "E1"))!;
+
+  const gl = (await s.getSourceLink("event", "entrio-hr", "E1"))!;
+  assert.equal(gl.sourceUrl, "https://src.example/E1");
+  assert.equal(gl.contentHash, hashComparable(eventComparable(row)));
+  assert.ok(!("sourceUrl" in gl.comparableFields));
+  assert.ok(!("source_url" in gl.comparableFields));
+
+  const [ll] = await s.listSourceLinks("event", "entrio-hr");
+  assert.equal(ll.sourceUrl, "https://src.example/E1");
+  assert.equal(ll.contentHash, hashComparable(eventComparable(row)));
+});
+
+test("[provenance] a null persisted source_url still round-trips as null through the synthesized link", async () => {
+  const fake = new FakeSupabase();
+  seedTvornica(fake);
+  const s = store(fake);
+  await runEvent(s, eventItem({ title: "DJ Night", sourceUrl: null }), "r1");
+
+  const gl = (await s.getSourceLink("event", "entrio-hr", "E1"))!;
+  assert.equal(gl.sourceUrl, null);
+  const [ll] = await s.listSourceLinks("event", "entrio-hr");
+  assert.equal(ll.sourceUrl, null);
+});
+
+test("[provenance] source_url changing does NOT change the synthesized link's contentHash", async () => {
+  const fake = new FakeSupabase();
+  seedTvornica(fake);
+  const s = store(fake);
+  await runEvent(s, eventItem({ title: "DJ Night", sourceUrl: "https://a.example/e" }), "r1");
+  const h1 = (await s.getSourceLink("event", "entrio-hr", "E1"))!.contentHash;
+  // same content, new provenance URL only
+  await runEvent(s, eventItem({ title: "DJ Night", sourceUrl: "https://b.example/e" }), "r2");
+  const link2 = (await s.getSourceLink("event", "entrio-hr", "E1"))!;
+  assert.equal(link2.sourceUrl, "https://b.example/e", "provenance URL followed the source");
+  assert.equal(link2.contentHash, h1, "contentHash is unaffected by source_url");
 });

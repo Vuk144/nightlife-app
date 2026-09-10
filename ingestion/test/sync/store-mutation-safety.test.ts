@@ -65,6 +65,7 @@ function event(over: Partial<CanonicalEvent> = {}): CanonicalEvent {
     ticketUrl: null,
     coverImageUrl: null,
     canonicalSourceKey: "entrio-hr",
+    sourceUrl: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...over,

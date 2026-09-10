@@ -112,6 +112,16 @@ export function cityKey(value: string): string {
     .trim();
 }
 
+/**
+ * Key of the country-authoritative city index: `"CC|<folded name>"`. The
+ * country is upper-cased so the index and every lookup agree case-insensitively;
+ * `foldedKey` is a `cityKey()` output (never contains `|`, so the separator is
+ * unambiguous). ONE definition — built and queried through the same function.
+ */
+function cityIndexKey(countryCode: string, foldedKey: string): string {
+  return `${countryCode.toUpperCase()}|${foldedKey}`;
+}
+
 export const DEFAULT_RECONCILIATION: ReconciliationThresholds = {
   staleAfterMisses: 1,
   missingAfterMisses: 2,
@@ -151,10 +161,20 @@ export function assertValidReconciliationThresholds(t: ReconciliationThresholds)
 }
 
 /**
+ * Regex flags every `CountryConfig.extraPlaceholderPatterns` source string is
+ * compiled with — placeholder names are matched case-insensitively. ONE
+ * definition: `config.ts` validates patterns with these flags at load, and
+ * `validation.ts#validateRecord` compiles them with the SAME flags at check
+ * time, so a pattern that load-validated can never fail to compile mid-run.
+ * A code-level contract, not deployment config.
+ */
+export const PLACEHOLDER_REGEX_FLAGS = "i";
+
+/**
  * `CountryConfig.extraPlaceholderPatterns` are regex SOURCE strings that
- * `validation.ts#validateRecord` compiles (`new RegExp(src, "i")`) for every
- * record it checks. An uncompilable pattern would throw mid-run, deep inside
- * record processing.
+ * `validation.ts#validateRecord` compiles (`new RegExp(src, PLACEHOLDER_REGEX_FLAGS)`)
+ * for every record it checks. An uncompilable pattern would throw mid-run, deep
+ * inside record processing.
  *
  * Same policy as {@link assertValidReconciliationThresholds}: this is the
  * generic config-validation layer — a bad pattern is REJECTED here, loudly, at
@@ -165,9 +185,9 @@ export function assertValidPlaceholderPatterns(countries: CountryConfig[]): void
   for (const country of countries) {
     country.extraPlaceholderPatterns.forEach((src, i) => {
       try {
-        // Same flags `validateRecord` uses — a pattern can be valid unflagged
-        // yet still need to compile with "i".
-        new RegExp(src, "i");
+        // The exact flags `validateRecord` uses — a pattern can be valid
+        // unflagged yet still need to compile with these.
+        new RegExp(src, PLACEHOLDER_REGEX_FLAGS);
       } catch (err) {
         throw new Error(
           `country "${country.code}": extraPlaceholderPatterns[${i}] is not a valid regex ` +
@@ -176,6 +196,60 @@ export function assertValidPlaceholderPatterns(countries: CountryConfig[]): void
       }
     });
   }
+}
+
+/**
+ * City config must be RESOLVABLE and UNAMBIGUOUS within a country.
+ *
+ * Same policy as {@link assertValidReconciliationThresholds} — rejected loudly
+ * at config load, never silently normalized:
+ *
+ *   - A `canonicalName` or `nameAlias` that `cityKey()` folds to `""` (e.g. a
+ *     non-Latin spelling — `cityKey` de-accents, it does NOT transliterate)
+ *     would be silently dropped from the resolution index. Reject it; config
+ *     must supply a Latin spelling.
+ *   - Two cities in the SAME country whose `canonicalName` folds to the same
+ *     key would silently "last-write-wins" in the country-qualified index and
+ *     go ambiguous country-less. Reject the duplicate.
+ *
+ * NOT rejected: two cities in DIFFERENT countries sharing a folded name (that
+ * is exactly the country-less ambiguity `resolveCity` handles), and an alias
+ * shared between cities.
+ */
+export function assertValidCityConfig(cities: CityConfig[]): void {
+  const claimedByCanonical = new Map<string, string>(); // `${CC}|${key}` → the canonicalName that claimed it
+  cities.forEach((city, i) => {
+    const cc = city.countryCode.toUpperCase();
+
+    const canonicalKey = cityKey(city.canonicalName);
+    if (!canonicalKey) {
+      throw new Error(
+        `city[${i}] (country "${city.countryCode}"): canonicalName ` +
+          `${JSON.stringify(city.canonicalName)} folds to an empty match key — ` +
+          `cityKey() de-accents but does not transliterate; supply a Latin spelling`,
+      );
+    }
+
+    city.nameAliases.forEach((alias, j) => {
+      if (!cityKey(alias)) {
+        throw new Error(
+          `city[${i}] "${city.canonicalName}" (country "${city.countryCode}"): ` +
+            `nameAliases[${j}] ${JSON.stringify(alias)} folds to an empty match key — ` +
+            `supply a Latin spelling or remove it`,
+        );
+      }
+    });
+
+    const indexKey = cityIndexKey(cc, canonicalKey);
+    const prior = claimedByCanonical.get(indexKey);
+    if (prior !== undefined) {
+      throw new Error(
+        `city[${i}] "${city.canonicalName}" (country "${city.countryCode}"): duplicate — ` +
+          `its folded name "${canonicalKey}" already belongs to "${prior}" in the same country`,
+      );
+    }
+    claimedByCanonical.set(indexKey, city.canonicalName);
+  });
 }
 
 export class InMemoryConfigProvider implements ConfigProvider {
@@ -192,6 +266,7 @@ export class InMemoryConfigProvider implements ConfigProvider {
   constructor(config: SyncConfig) {
     assertValidReconciliationThresholds(config.reconciliation);
     assertValidPlaceholderPatterns(config.countries);
+    assertValidCityConfig(config.cities);
     this.config = config;
     this.cityIndex = new Map();
     this.countrylessCityIndex = new Map();
@@ -206,7 +281,7 @@ export class InMemoryConfigProvider implements ConfigProvider {
   private indexCity(city: CityConfig, key: string, via: CityResolution["via"]): void {
     if (!key) return;
     const res: CityResolution = { city, via };
-    this.cityIndex.set(`${city.countryCode.toUpperCase()}|${key}`, res);
+    this.cityIndex.set(cityIndexKey(city.countryCode, key), res);
     // Track ALL distinct cities for this key — never overwrite. A key shared by
     // two countries' cities must stay ambiguous, not collapse to "last wins".
     const bucket = this.countrylessCityIndex.get(key);
@@ -240,7 +315,7 @@ export class InMemoryConfigProvider implements ConfigProvider {
     if (cc) {
       // Country is authoritative: only a city configured for THIS country can
       // match. Never fall back to another country's city or alias.
-      return this.cityIndex.get(`${cc}|${key}`) ?? null;
+      return this.cityIndex.get(cityIndexKey(cc, key)) ?? null;
     }
 
     // Country-less: accept only when exactly one distinct city matches.

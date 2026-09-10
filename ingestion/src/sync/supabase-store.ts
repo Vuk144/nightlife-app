@@ -270,11 +270,11 @@ export class SupabaseCanonicalStore implements CanonicalStore {
     if (kind === "venue") {
       const v = await this.getVenueBySource(sourceKey, externalId);
       if (!v) return null;
-      return this.synthLink("venue", sourceKey, externalId, v.id, venueComparable(v), v);
+      return this.synthLink("venue", sourceKey, externalId, v.id, venueComparable(v), v, v.sourceUrl);
     }
     const e = await this.getEventBySource(sourceKey, externalId);
     if (!e) return null;
-    return this.synthLink("event", sourceKey, externalId, e.id, eventComparable(e), e);
+    return this.synthLink("event", sourceKey, externalId, e.id, eventComparable(e), e, e.sourceUrl);
   }
 
   async listSourceLinks(kind: EntityKind, sourceKey: string): Promise<SourceLink[]> {
@@ -290,7 +290,7 @@ export class SupabaseCanonicalStore implements CanonicalStore {
       for (const r of data ?? []) {
         const v = await this.venueRowToCanonical(r as Row);
         links.push(
-          this.synthLink("venue", sourceKey, v.externalId ?? "", v.id, venueComparable(v), v),
+          this.synthLink("venue", sourceKey, v.externalId ?? "", v.id, venueComparable(v), v, v.sourceUrl),
         );
       }
       return links;
@@ -299,7 +299,7 @@ export class SupabaseCanonicalStore implements CanonicalStore {
     this.throwOnError(error, ctx("read", "event", null, sourceKey, null, "events.select"));
     return (data ?? []).map((r: Row) => {
       const e = eventRowToCanonical(r);
-      return this.synthLink("event", sourceKey, extId(r), e.id, eventComparable(e), e);
+      return this.synthLink("event", sourceKey, extId(r), e.id, eventComparable(e), e, e.sourceUrl);
     });
   }
 
@@ -310,16 +310,19 @@ export class SupabaseCanonicalStore implements CanonicalStore {
     canonicalId: string,
     fields: Record<string, JsonValue>,
     row: { createdAt: string; updatedAt: string },
+    sourceUrl: string | null,
   ): SourceLink {
     // The current schema has one inline provenance timestamp (`last_synced_at`)
     // and no content hash / status columns. We reconstruct `contentHash` from
-    // the canonical fields so change detection still works.
+    // the canonical fields so change detection still works. `sourceUrl` is
+    // provenance metadata reconstructed from the persisted row (`venues` /
+    // `events` `source_url`), NOT part of `contentHash`.
     return {
       id: `${kind}:${sourceKey}:${externalId}`,
       kind,
       sourceKey,
       externalId,
-      sourceUrl: null,
+      sourceUrl,
       canonicalId,
       contentHash: hashComparable(fields),
       comparableFields: fields,
@@ -748,6 +751,14 @@ export class SupabaseCanonicalStore implements CanonicalStore {
     );
     result.updated++;
     result.notes.push(`event updated: ${targetId}`);
+    // Consistency with the INSERT path: the current schema can only persist
+    // is_cancelled, so a "postponed" / "rescheduled" status is flattened to
+    // scheduled — record it rather than silently dropping the distinction.
+    if (f.status === "postponed" || f.status === "rescheduled") {
+      result.deferred.push(
+        `event ${targetId}: status "${f.status}" flattened to scheduled — current schema only has is_cancelled`,
+      );
+    }
   }
 
   private async linkEvent(
@@ -912,6 +923,7 @@ function eventRowToCanonical(r: Row): CanonicalEvent {
     ticketUrl: r.ticket_url == null ? null : String(r.ticket_url),
     coverImageUrl: r.cover_image_url == null ? null : String(r.cover_image_url),
     canonicalSourceKey: "",
+    sourceUrl: r.source_url == null ? null : String(r.source_url),
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
