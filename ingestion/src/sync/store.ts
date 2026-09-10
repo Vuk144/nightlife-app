@@ -120,6 +120,8 @@ export interface CanonicalEvent {
   ticketUrl: string | null;
   coverImageUrl: string | null;
   canonicalSourceKey: string;
+  /** Provenance metadata — the source's canonical URL for this record. Never in the content hash. */
+  sourceUrl: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -513,6 +515,7 @@ export class InMemoryCanonicalStore implements CanonicalStore {
         ticketUrl: f.ticketUrl,
         coverImageUrl: f.coverImageUrl,
         canonicalSourceKey: p.sourceKey,
+        sourceUrl: p.sourceUrl,
         createdAt: now,
         updatedAt: now,
       });

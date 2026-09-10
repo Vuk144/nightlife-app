@@ -32,22 +32,50 @@ function zoneOffsetMinutes(instant: number, timeZone: string): number {
 }
 
 /**
+ * True when `Date.UTC(...)` did NOT normalise any component away — i.e. the
+ * parsed fields form a real calendar date/time. `Date.UTC(2026, 1, 30)` rolls
+ * "Feb 30" into March, `Date.UTC(2026, 12, 1)` rolls "month 13" into next year,
+ * an hour of 25 rolls into the next day, and so on; every such roll changes at
+ * least one round-tripped component.
+ */
+function isRealCalendarInstant(
+  ms: number,
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): boolean {
+  const d = new Date(ms);
+  return (
+    d.getUTCFullYear() === year &&
+    d.getUTCMonth() === month - 1 &&
+    d.getUTCDate() === day &&
+    d.getUTCHours() === hour &&
+    d.getUTCMinutes() === minute &&
+    d.getUTCSeconds() === second
+  );
+}
+
+/**
  * `"2026-07-01T22:00"` + `"Europe/Zagreb"` → `"2026-07-01T20:00:00.000Z"`.
  * A bare `"2026-07-01"` is treated as local midnight.
- * Returns `null` when the input is unparseable.
+ * Returns `null` when the input is unparseable OR calendar-impossible
+ * (`2026-02-30`, month 13, hour 25, …) — such a value is never silently rolled
+ * into a different real date.
  */
 export function localToInstant(local: string, timeZone: string): string | null {
   const m = local.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2}))?/);
   if (!m) return null;
   const [, y, mo, d, hh, mi] = m;
-  const wall = Date.UTC(
-    Number(y),
-    Number(mo) - 1,
-    Number(d),
-    Number(hh ?? 0),
-    Number(mi ?? 0),
-    0,
-  );
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(hh ?? 0);
+  const minute = Number(mi ?? 0);
+  const wall = Date.UTC(year, month - 1, day, hour, minute, 0);
+  if (!isRealCalendarInstant(wall, year, month, day, hour, minute, 0)) return null;
   let guess = wall;
   for (let i = 0; i < 3; i++) {
     const corrected = wall - zoneOffsetMinutes(guess, timeZone) * 60000;
@@ -84,7 +112,8 @@ function hasExplicitOffset(value: string): boolean {
  *    exists (`Date.parse` would treat it as *process-local*, which is the bug
  *    this function exists to avoid).
  *
- * Returns `null` when no date can be recognised.
+ * Returns `null` when no date can be recognised, or when the recognised fields
+ * are calendar-impossible (`2026-02-30`, month 13, hour 25, …) — never rolled.
  */
 export function toInstantMs(
   local: string | null | undefined,
@@ -110,14 +139,14 @@ export function toInstantMs(
   }
 
   // No zone (or date-only): interpret the wall-clock as UTC.
-  return Date.UTC(
-    Number(y),
-    Number(mo) - 1,
-    Number(d),
-    Number(hh ?? 0),
-    Number(mi ?? 0),
-    Number(ss ?? 0),
-  );
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(hh ?? 0);
+  const minute = Number(mi ?? 0);
+  const second = Number(ss ?? 0);
+  const ms = Date.UTC(year, month - 1, day, hour, minute, second);
+  return isRealCalendarInstant(ms, year, month, day, hour, minute, second) ? ms : null;
 }
 
 /**

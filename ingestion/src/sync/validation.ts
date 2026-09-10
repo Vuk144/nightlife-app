@@ -17,6 +17,7 @@
  * config that reached the engine.
  */
 
+import { PLACEHOLDER_REGEX_FLAGS } from "./config.ts";
 import type { CountryConfig } from "./config.ts";
 import type { GeoBounds, NormalizedRecord, ResolvedScope, ValidationResult } from "./types.ts";
 
@@ -89,7 +90,7 @@ export function validateRecord(input: {
 }): ValidationResult {
   const { record, scope, country } = input;
   const extra = (country?.extraPlaceholderPatterns ?? []).map(
-    (src) => new RegExp(src, "i"),
+    (src) => new RegExp(src, PLACEHOLDER_REGEX_FLAGS),
   );
 
   if (!record.provenance.externalId) return reject("missing-external-id");

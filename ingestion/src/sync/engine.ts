@@ -61,7 +61,10 @@ export interface PlanSyncInput {
 export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   const { adapter, source, config, store, now, runId } = input;
   const cfg = config.load();
-  const startedAtMs = Date.parse(now) || 0;
+  // Wall-clock start — the ONLY non-deterministic value in the plan, and used
+  // solely for `stats.durationMs`. `now` (the injected logical timestamp) is
+  // kept for `run.startedAt` and every downstream comparison.
+  const startedAtMs = Date.now();
 
   const stats: SyncRunStats = {
     discovered: 0,
@@ -631,7 +634,7 @@ function finish(
   input: PlanSyncInput,
   startedAtMs: number,
 ): SyncPlan {
-  stats.durationMs = Math.max(0, (Date.parse(input.now) || startedAtMs) - startedAtMs);
+  stats.durationMs = Math.max(0, Date.now() - startedAtMs);
   return {
     run: {
       runId: input.runId,

@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { detectChange, diffComparable } from "../../src/sync/change-detection.ts";
 import { hashComparable, stableStringify } from "../../src/sync/canonical-hash.ts";
-import type { JsonValue, StoredRecordState, ValidationResult } from "../../src/sync/types.ts";
+import type {
+  ChangeResult,
+  JsonValue,
+  StoredRecordState,
+  ValidationResult,
+} from "../../src/sync/types.ts";
 
 const OK: ValidationResult = { outcome: "ok", reasonCode: null, reasons: [] };
 const NOW = "2026-06-01T12:00:00.000Z";
@@ -207,4 +212,237 @@ test("hashComparable is SHA-256 (64 lowercase hex) and order-stable", () => {
   const h = hashComparable({ a: 1, b: "x", c: null });
   assert.match(h, /^[0-9a-f]{64}$/);
   assert.equal(h, hashComparable({ c: null, b: "x", a: 1 }));
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  detectChange — full status × field matrix (characterization)
+//
+//  The audit found NO correctness bug. These lock in every branch of
+//  detectChange: which validation outcomes short-circuit, what each
+//  outcome reports for status / contentHashChanged / fieldDeltas / note
+//  / firstSeenAt / lastSeenAt, and the stored===null edges.
+// ════════════════════════════════════════════════════════════════════
+
+const REJECT = (code: string | null = "some-reason"): ValidationResult => ({
+  outcome: "rejected",
+  reasonCode: code,
+  reasons: code ? [code] : [],
+});
+const REVIEW = (code: string | null = "city-unresolved"): ValidationResult => ({
+  outcome: "needs_review",
+  reasonCode: code,
+  reasons: code ? [code] : [],
+});
+
+const inc = (contentHash: string, comparableFields: Record<string, JsonValue> = {}) => ({
+  contentHash,
+  comparableFields,
+});
+
+test("[detectChange] lastSeenAt is `now` in EVERY outcome — the record WAS seen this run", () => {
+  const cf = stored().comparableFields;
+  const runs: ChangeResult[] = [
+    detectChange({ incoming: inc("h"), stored: null, validation: OK, now: NOW }), // NEW
+    detectChange({ incoming: inc("hash-A", cf), stored: stored(), validation: OK, now: NOW }), // UNCHANGED
+    detectChange({ incoming: inc("hash-B", { t: 1 }), stored: stored(), validation: OK, now: NOW }), // UPDATED
+    detectChange({ incoming: inc("h"), stored: stored(), validation: REJECT(), now: NOW }), // REJECTED + stored
+    detectChange({ incoming: inc("h"), stored: null, validation: REJECT(), now: NOW }), // REJECTED, no stored
+    detectChange({ incoming: inc("h"), stored: stored(), validation: REVIEW(), now: NOW }), // NEEDS_REVIEW + stored
+    detectChange({ incoming: inc("h"), stored: null, validation: REVIEW(), now: NOW }), // NEEDS_REVIEW, no stored
+  ];
+  for (const r of runs) assert.equal(r.lastSeenAt, NOW);
+});
+
+test("[detectChange] firstSeenAt: preserved from stored where stored exists, else `now`", () => {
+  const S = "2026-01-01T00:00:00.000Z";
+  const st = () => stored({ firstSeenAt: S });
+  const preserved = [
+    detectChange({ incoming: inc("hash-A", st().comparableFields), stored: st(), validation: OK, now: NOW }), // UNCHANGED
+    detectChange({ incoming: inc("hash-Z", { x: 1 }), stored: st(), validation: OK, now: NOW }), // UPDATED
+    detectChange({ incoming: inc("h"), stored: st(), validation: REJECT(), now: NOW }), // REJECTED + stored
+    detectChange({ incoming: inc("h"), stored: st(), validation: REVIEW(), now: NOW }), // NEEDS_REVIEW + stored
+  ];
+  for (const r of preserved) assert.equal(r.firstSeenAt, S);
+
+  const fresh = [
+    detectChange({ incoming: inc("h"), stored: null, validation: OK, now: NOW }), // NEW
+    detectChange({ incoming: inc("h"), stored: null, validation: REJECT(), now: NOW }), // REJECTED, no stored
+    detectChange({ incoming: inc("h"), stored: null, validation: REVIEW(), now: NOW }), // NEEDS_REVIEW, no stored
+  ];
+  for (const r of fresh) assert.equal(r.firstSeenAt, NOW);
+});
+
+test("[detectChange] REJECTED short-circuits: no diff, no hash comparison, whatever the stored state", () => {
+  for (const st of [null, stored({ contentHash: "totally-diff", comparableFields: { a: 1, b: 2, c: 3 } })]) {
+    const r = detectChange({
+      incoming: inc("x", { z: 99 }),
+      stored: st,
+      validation: REJECT("placeholder-venue-name"),
+      now: NOW,
+    });
+    assert.equal(r.status, "REJECTED");
+    assert.equal(r.contentHashChanged, false, "REJECTED never reports a content change");
+    assert.deepEqual(r.fieldDeltas, [], "REJECTED never diffs");
+    assert.equal(r.note, "placeholder-venue-name");
+  }
+});
+
+test("[detectChange] REJECTED note falls back to a default when validation carries no reasonCode", () => {
+  const r = detectChange({
+    incoming: inc("x"),
+    stored: null,
+    validation: { outcome: "rejected", reasonCode: null, reasons: [] },
+    now: NOW,
+  });
+  assert.equal(r.note, "rejected by validation");
+});
+
+test("[detectChange] NEEDS_REVIEW short-circuits status but STILL reports the real hash/field comparison", () => {
+  const st = stored({
+    contentHash: "hash-A",
+    comparableFields: { title: "DJ Night", startLocal: "2026-07-01T22:00", status: "scheduled" },
+  });
+
+  // a) would-be UNCHANGED (same hash) — still NEEDS_REVIEW, nothing "changed"
+  const same = detectChange({
+    incoming: inc("hash-A", st.comparableFields),
+    stored: st,
+    validation: REVIEW("city-unresolved"),
+    now: NOW,
+  });
+  assert.equal(same.status, "NEEDS_REVIEW");
+  assert.equal(same.contentHashChanged, false);
+  assert.deepEqual(same.fieldDeltas, []);
+  assert.equal(same.note, "city-unresolved");
+
+  // b) would-be UPDATED (different hash) — NEEDS_REVIEW, real deltas surfaced, note falls back
+  const changed = detectChange({
+    incoming: inc("hash-B", { title: "DJ Night", startLocal: "2026-07-01T23:00", status: "scheduled" }),
+    stored: st,
+    validation: REVIEW(null),
+    now: NOW,
+  });
+  assert.equal(changed.status, "NEEDS_REVIEW");
+  assert.equal(changed.contentHashChanged, true);
+  assert.deepEqual(changed.fieldDeltas, [
+    { field: "startLocal", from: "2026-07-01T22:00", to: "2026-07-01T23:00" },
+  ]);
+  assert.equal(changed.note, "held for review");
+});
+
+test("[detectChange] NEEDS_REVIEW with NO stored state → contentHashChanged:true, no deltas", () => {
+  const r = detectChange({
+    incoming: inc("h", { title: "x" }),
+    stored: null,
+    validation: REVIEW(),
+    now: NOW,
+  });
+  assert.equal(r.status, "NEEDS_REVIEW");
+  assert.equal(r.contentHashChanged, true);
+  assert.deepEqual(r.fieldDeltas, []);
+});
+
+test("[detectChange] contentHashChanged / note per non-review outcome", () => {
+  const st = stored();
+  const nw = detectChange({ incoming: inc("h"), stored: null, validation: OK, now: NOW });
+  assert.equal(nw.status, "NEW");
+  assert.equal(nw.contentHashChanged, true);
+  assert.equal(nw.note, "no stored state for this source record");
+  assert.deepEqual(nw.fieldDeltas, []);
+
+  const un = detectChange({ incoming: inc("hash-A", st.comparableFields), stored: st, validation: OK, now: NOW });
+  assert.equal(un.status, "UNCHANGED");
+  assert.equal(un.contentHashChanged, false);
+  assert.equal(un.note, "content hash unchanged");
+
+  const up = detectChange({
+    incoming: inc("hash-B", { title: "DJ Night", startLocal: "2026-07-01T23:00", status: "scheduled" }),
+    stored: st,
+    validation: OK,
+    now: NOW,
+  });
+  assert.equal(up.status, "UPDATED");
+  assert.equal(up.contentHashChanged, true);
+  assert.equal(up.note, "changed: startLocal");
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  Engine contract — incoming.contentHash === hashComparable(fields),
+//  stored.contentHash === hashComparable(stored.comparableFields).
+//  Under that contract detectChange's status follows the hash⟺diff
+//  invariant exactly (this is how the real engine calls it — see
+//  engine.ts: `hashComparable(comparable(record))`).
+// ════════════════════════════════════════════════════════════════════
+
+const realInc = (fields: Record<string, JsonValue>) => ({
+  contentHash: hashComparable(fields),
+  comparableFields: fields,
+});
+const realStored = (fields: Record<string, JsonValue>, over: Partial<StoredRecordState> = {}) =>
+  stored({ contentHash: hashComparable(fields), comparableFields: fields, ...over });
+
+test("[engine-contract] key-reordered-identical fields → UNCHANGED, empty deltas", () => {
+  const a = { name: "Depo", lat: 44.8, lon: 20.5, website: null, isActive: true };
+  const b = { isActive: true, website: null, lon: 20.5, lat: 44.8, name: "Depo" };
+  const r = detectChange({ incoming: realInc(b), stored: realStored(a), validation: OK, now: NOW });
+  assert.equal(r.status, "UNCHANGED");
+  assert.deepEqual(r.fieldDeltas, []);
+  assert.equal(r.contentHashChanged, false);
+});
+
+test("[engine-contract] a real field change → UPDATED with the matching sorted non-empty deltas", () => {
+  const before = { name: "Depo", lat: 44.8, lon: 20.5, address: null };
+  const after = { name: "Depo Klub", lat: 44.8, lon: 20.5, address: "Trg 1" };
+  const r = detectChange({ incoming: realInc(after), stored: realStored(before), validation: OK, now: NOW });
+  assert.equal(r.status, "UPDATED");
+  assert.equal(r.contentHashChanged, true);
+  assert.deepEqual(r.fieldDeltas, [
+    { field: "address", from: null, to: "Trg 1" },
+    { field: "name", from: "Depo", to: "Depo Klub" },
+  ]);
+  assert.equal(r.fieldDeltas.length > 0, r.contentHashChanged, "invariant at the detectChange level");
+});
+
+test("[engine-contract] UPDATED note lists exactly the changed field names, sorted", () => {
+  const r = detectChange({
+    incoming: realInc({ a: 1, b: 2, c: 3 }),
+    stored: realStored({ a: 9, b: 2, c: 9 }),
+    validation: OK,
+    now: NOW,
+  });
+  assert.equal(r.status, "UPDATED");
+  assert.equal(r.note, "changed: a, c");
+});
+
+test("[engine-contract] detectChange is idempotent — identical inputs give deep-equal outputs", () => {
+  const build = () => ({
+    incoming: realInc({ name: "X", lat: 1, lon: 2 }),
+    stored: realStored({ name: "X", lat: 1, lon: 9 }),
+    validation: OK,
+    now: NOW,
+  });
+  assert.deepEqual(detectChange(build()), detectChange(build()));
+});
+
+// ── diffComparable: determinism + deep comparison ───────────────────
+
+test("[diffComparable] delta order is the sorted union of field names", () => {
+  const d = diffComparable(
+    { zebra: 1, apple: 1, mango: 1, "10": 1, "2": 1 },
+    { zebra: 2, apple: 2, mango: 2, "10": 2, "2": 2 },
+  );
+  assert.deepEqual(d.map((x) => x.field), ["10", "2", "apple", "mango", "zebra"]);
+});
+
+test("[diffComparable] nested objects / arrays are compared deeply (whole value as from/to)", () => {
+  assert.deepEqual(
+    diffComparable({ o: { a: 1 } }, { o: { a: 1, b: 2 } }),
+    [{ field: "o", from: { a: 1 }, to: { a: 1, b: 2 } }],
+  );
+  assert.deepEqual(
+    diffComparable({ tags: ["a", "b"] }, { tags: ["b", "a"] }),
+    [{ field: "tags", from: ["a", "b"], to: ["b", "a"] }],
+  );
+  // nested key reorder only → NOT a delta (jsonEqual is via stableStringify)
+  assert.deepEqual(diffComparable({ o: { a: 1, b: 2 } }, { o: { b: 2, a: 1 } }), []);
 });

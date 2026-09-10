@@ -67,5 +67,12 @@ const PROFILES: Record<string, NormalizationProfile> = {
 /** The profile for a country, from `CountryConfig.normalizationProfile` (data). */
 export function profileFor(country: CountryConfig | null): NormalizationProfile {
   if (!country) return latinProfile;
-  return PROFILES[country.normalizationProfile] ?? latinProfile;
+  const key = country.normalizationProfile;
+  // Own-property check only: a `key` that happens to name an `Object.prototype`
+  // member ("constructor", "toString", "__proto__", …) must still fall through
+  // to the default — a bare `PROFILES[key]` would resolve it to an inherited
+  // value that is not a `NormalizationProfile`.
+  return Object.prototype.hasOwnProperty.call(PROFILES, key)
+    ? PROFILES[key]
+    : latinProfile;
 }
