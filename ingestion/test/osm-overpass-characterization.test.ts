@@ -959,3 +959,81 @@ test("collectVenuesForTarget: a definitive fetch failure propagates (caller writ
   assert.equal(value, undefined);
   assert.match((error as Error).message, /Overpass request failed/);
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  5. B7 — zero-element responses
+//
+//  A clean HTTP 200 `{ "elements": [] }` (no `remark`, no HTTP error) is a
+//  STRUCTURALLY COMPLETE response. The adapter treats it as a successful
+//  collection of zero venues and has no way to tell a legitimately empty
+//  city from a bad `osmRelationId` / ungenerated area — both look identical
+//  on the wire. There is NO reconcile/delete pass today, so an empty result
+//  is a pure no-op (no data loss). These tests characterize the current
+//  behavior only — no production change is proposed in this step.
+// ════════════════════════════════════════════════════════════════════
+
+test("[B7 characterization] fetchOverpass accepts a clean 200 `{ elements: [] }` as success", async (t) => {
+  const { calls } = installFetch(t, [{ status: 200, json: { elements: [] } }]);
+
+  const res = await fetchOverpass(QUERY, CONFIG, { attempts: 1 });
+
+  assert.deepEqual(res, { elements: [] });
+  assert.equal(calls.length, 1, "one request, no retry, no throw");
+});
+
+test("[B7 characterization] parseOverpassVenues on `{ elements: [] }` → every bucket empty", () => {
+  assert.deepEqual(parseOverpassVenues({ elements: [] }, BELGRADE), {
+    venues: [],
+    invalid: [],
+    excluded: [],
+  });
+});
+
+test("[B7 characterization] collectVenuesForTarget(Belgrade) on `{ elements: [] }` → fetched:0, resolves (treated as success)", async (t) => {
+  installFetch(t, [{ status: 200, json: { elements: [] } }]);
+
+  const result = await collectVenuesForTarget(BELGRADE, CONFIG);
+
+  assert.deepEqual(result, { venues: [], invalid: [], excluded: [], fetched: 0 });
+  // the promise resolved and nothing threw — the source run is "successful".
+});
+
+test("[B7 characterization] control: a non-empty response yields non-zero counts", async (t) => {
+  installFetch(t, [
+    { status: 200, json: { elements: [ACCEPTED_EL, INVALID_EL, EXCLUDED_EL] } },
+  ]);
+
+  const result = await collectVenuesForTarget(BELGRADE, CONFIG);
+
+  assert.equal(result.fetched, 3);
+  assert.equal(result.venues.length, 1);
+  assert.equal(result.invalid.length, 1);
+  assert.equal(result.excluded.length, 1);
+});
+
+test("[B7 characterization] a bogus `osmRelationId` that returns `{ elements: [] }` is INDISTINGUISHABLE from a legit empty city", async (t) => {
+  const BOGUS: IngestionTarget = {
+    countryId: "RS",
+    cityName: "Belgrade",
+    osmRelationId: 999_999_999, // not a real boundary relation
+  };
+  const { calls } = installFetch(t, [{ status: 200, json: { elements: [] } }]);
+
+  const result = await collectVenuesForTarget(BOGUS, CONFIG);
+
+  // identical outcome to a legitimately empty city — no validation, no warning
+  assert.deepEqual(result, { venues: [], invalid: [], excluded: [], fetched: 0 });
+  // …and the bogus id flowed straight into the query, unvalidated:
+  const sent = new URLSearchParams(calls[0].init.body as string).get("data") ?? "";
+  assert.ok(sent.includes(`area(id:${3_600_000_000 + 999_999_999})`));
+});
+
+test("[B7 characterization] contrast: `{ elements: [] }` WITH a remark is rejected (B2); a clean one is not", async (t) => {
+  // The adapter catches server-SIGNALLED incompleteness (`remark`), never
+  // silent emptiness.
+  installFetch(t, [{ status: 200, json: { elements: [], remark: "runtime error: reduce load" } }]);
+  await assert.rejects(fetchOverpass(QUERY, CONFIG, { attempts: 1 }), /error remark/);
+
+  installFetch(t, [{ status: 200, json: { elements: [] } }]);
+  await assert.doesNotReject(fetchOverpass(QUERY, CONFIG, { attempts: 1 }));
+});
