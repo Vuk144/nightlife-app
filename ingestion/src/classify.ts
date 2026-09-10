@@ -35,6 +35,21 @@ export const CATEGORY_LABELS: Record<VenueCategory, string> = {
 };
 
 // ── Regional name layers (Serbia / Balkans-specific) ───────────────────
+
+/**
+ * Escape one string so it matches literally inside a regex. Applied to each
+ * regional vocabulary term BEFORE the terms are `|`-joined into a
+ * `*_NAME_OVERPASS` alternation for the Overpass `~"…"` operator, so a term
+ * with a regex metacharacter can never change the pattern's meaning (audit B6).
+ * The `|` between terms stays intentional alternation.
+ *
+ * `rescue.ts` keeps its own escaper for the Layer C rescue names — deliberately
+ * not shared (that path is unchanged).
+ */
+export function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const KAFANA_TERMS = [
   "kafana", "кафана", "Кафана",
   "mehana", "meana", "механа", "Механа",
@@ -43,21 +58,27 @@ const KAFANA_TERMS = [
   "taverna", "таверна", "Таверна",
   "čarda", "carda", "чарда", "Чарда",
 ];
-export const KAFANA_NAME_OVERPASS = KAFANA_TERMS.join("|");
+export const KAFANA_NAME_OVERPASS = KAFANA_TERMS.map(escapeRegexLiteral).join("|");
 export const KAFANA_NAME_REGEX = new RegExp(KAFANA_TERMS.join("|"), "i");
 
 const SPLAV_TERMS = ["splav", "сплав", "Сплав"];
-export const SPLAV_NAME_OVERPASS = SPLAV_TERMS.join("|");
+export const SPLAV_NAME_OVERPASS = SPLAV_TERMS.map(escapeRegexLiteral).join("|");
 export const SPLAV_NAME_REGEX = new RegExp(SPLAV_TERMS.join("|"), "i");
 
 const SHISHA_TERMS = ["shisha", "hookah", "nargila", "nargile", "narghile", "наргил", "наргил"];
-export const SHISHA_NAME_OVERPASS = SHISHA_TERMS.join("|");
+export const SHISHA_NAME_OVERPASS = SHISHA_TERMS.map(escapeRegexLiteral).join("|");
 export const SHISHA_NAME_REGEX = new RegExp(SHISHA_TERMS.join("|"), "i");
 
 const NAME_BASE_AMENITIES = new Set(["restaurant", "bar", "pub", "cafe"]);
 
 // ── Layer B base categories ──────────────────────────────────────────
-const LAYER_B_AMENITIES = new Set([
+/**
+ * Canonical Layer B base-amenity list — the single source of truth.
+ * `classifyOsmElement` uses it to accept post-fetch; `sources/osm-overpass.ts`
+ * consumes the same set to server-gate the Layer B query clauses. Insertion
+ * order is the query's alternation order, so keep it stable.
+ */
+export const LAYER_B_AMENITIES = new Set([
   "restaurant",
   "cafe",
   "theatre",
