@@ -16,9 +16,11 @@
  *   B2  FIXED (Step 6A) — an Overpass 200 with a meaningful top-level `remark`
  *       is now a (transient) failure whether or not `elements` is present; a
  *       degraded / partial result is never accepted. Guarded by `[B2 regression]`.
- *   B3  `parseOverpassVenues` deduplicates accepted venues only; duplicate
- *       `invalid` / `excluded` elements from overlapping query clauses are
- *       counted twice and inflate `fetched`.
+ *   B3  FIXED (Step 6B) — `parseOverpassVenues` now deduplicates by source
+ *       identity (`type/id`) across ALL buckets, so a duplicate `invalid` /
+ *       `excluded` element is processed and counted once; `fetched` reflects
+ *       unique elements. Guarded by `[B3 regression]`. Elements with no
+ *       resolvable identity (`"(unknown)"`) are still each kept.
  *
  * The fake-`fetch` + mock-timer pattern mirrors `test/events/http.test.ts`.
  */
@@ -542,31 +544,87 @@ test("parseOverpassVenues: an accepted element repeated by overlapping clauses i
   assert.equal(excluded.length, 0);
 });
 
-test("parseOverpassVenues: [characterizes bug B3] a repeated INVALID element is counted once per occurrence", () => {
-  // CURRENT behavior: the `seen` set is only consulted on the accepted branch.
-  const { invalid } = parseOverpassVenues({ elements: [INVALID_EL, INVALID_EL] });
+test("parseOverpassVenues: [B3 regression] a repeated INVALID element is counted once", () => {
+  const { invalid } = parseOverpassVenues({ elements: [INVALID_EL, INVALID_EL, INVALID_EL] });
 
-  assert.equal(invalid.length, 2, "BUG B3: invalid duplicates are not deduped");
-  assert.deepEqual(invalid[0], invalid[1]);
+  assert.equal(invalid.length, 1, "the same node/4004 must be reported once");
   assert.equal(invalid[0].ref, "node/4004");
 });
 
-test("parseOverpassVenues: [characterizes bug B3] a repeated EXCLUDED element is counted once per occurrence", () => {
-  const { excluded } = parseOverpassVenues({ elements: [EXCLUDED_EL, EXCLUDED_EL] });
+test("parseOverpassVenues: [B3 regression] a repeated EXCLUDED element is counted once", () => {
+  const { excluded } = parseOverpassVenues({ elements: [EXCLUDED_EL, EXCLUDED_EL, EXCLUDED_EL] });
 
-  assert.equal(excluded.length, 2, "BUG B3: excluded duplicates are not deduped");
-  assert.deepEqual(excluded[0], excluded[1]);
+  assert.equal(excluded.length, 1, "the same node/6006 must be reported once");
   assert.equal(excluded[0].ref, "node/6006");
 });
 
-test("parseOverpassVenues: mixed duplicates - only the accepted one collapses", () => {
+test("parseOverpassVenues: [B3 regression] mixed duplicates all collapse by identity", () => {
   const { venues, invalid, excluded } = parseOverpassVenues({
     elements: [ACCEPTED_EL, INVALID_EL, EXCLUDED_EL, ACCEPTED_EL, INVALID_EL, EXCLUDED_EL],
   });
 
   assert.equal(venues.length, 1);
-  assert.equal(invalid.length, 2); // B3
-  assert.equal(excluded.length, 2); // B3
+  assert.equal(invalid.length, 1);
+  assert.equal(excluded.length, 1);
+});
+
+test("parseOverpassVenues: [B3 regression] distinct elements sharing a name are NOT collapsed", () => {
+  // Same name, different OSM identity → two real, separate venues.
+  const a: OverpassElement = {
+    type: "node",
+    id: 111,
+    lat: 44.81,
+    lon: 20.41,
+    tags: { amenity: "bar", name: "Same Name Bar" },
+  };
+  const b: OverpassElement = {
+    type: "node",
+    id: 222,
+    lat: 44.92,
+    lon: 20.52,
+    tags: { amenity: "bar", name: "Same Name Bar" },
+  };
+
+  const { venues } = parseOverpassVenues({ elements: [a, b] });
+
+  assert.equal(venues.length, 2);
+  assert.deepEqual(venues.map((v) => v.externalId).sort(), ["node/111", "node/222"]);
+});
+
+test("parseOverpassVenues: [B3 regression] distinct invalid and distinct excluded elements are each counted", () => {
+  const inv1: OverpassElement = { type: "node", id: 301, lat: 44.8, lon: 20.4, tags: { amenity: "nightclub" } };
+  const inv2: OverpassElement = { type: "way", id: 302, center: { lat: 44.8, lon: 20.4 }, tags: { amenity: "bar" } };
+  const exc1: OverpassElement = {
+    type: "node",
+    id: 401,
+    lat: 44.8,
+    lon: 20.4,
+    tags: { amenity: "restaurant", name: "Plain One" },
+  };
+  const exc2: OverpassElement = {
+    type: "node",
+    id: 402,
+    lat: 44.8,
+    lon: 20.4,
+    tags: { amenity: "restaurant", name: "Plain Two" },
+  };
+
+  const { invalid, excluded } = parseOverpassVenues({ elements: [inv1, inv2, exc1, exc2] });
+
+  assert.equal(invalid.length, 2);
+  assert.equal(excluded.length, 2);
+});
+
+test("parseOverpassVenues: [B3 regression] elements with no resolvable identity are each kept", () => {
+  // Neither has a numeric id → both resolve to ref "(unknown)"; they are two
+  // different broken elements and must not be merged into one.
+  const broken1 = { type: "node", tags: { note: "one" } } as unknown as OverpassElement;
+  const broken2 = { type: "node", tags: { note: "two" } } as unknown as OverpassElement;
+
+  const { invalid } = parseOverpassVenues({ elements: [broken1, broken2] });
+
+  assert.equal(invalid.length, 2);
+  assert.ok(invalid.every((i) => i.ref === "(unknown)"));
 });
 
 // ════════════════════════════════════════════════════════════════════
@@ -612,7 +670,7 @@ test("collectVenuesForTarget: `fetched` = venues + invalid + excluded (post-dedu
   );
 });
 
-test("collectVenuesForTarget: [characterizes bug B3] duplicate invalid/excluded elements inflate `fetched`", async (t) => {
+test("collectVenuesForTarget: [B3 regression] `fetched` counts unique elements, not raw duplicate occurrences", async (t) => {
   installFetch(t, [
     {
       status: 200,
@@ -625,9 +683,9 @@ test("collectVenuesForTarget: [characterizes bug B3] duplicate invalid/excluded 
   const result = await collectVenuesForTarget(BELGRADE, CONFIG);
 
   assert.equal(result.venues.length, 1, "accepted collapses");
-  assert.equal(result.invalid.length, 2, "B3");
-  assert.equal(result.excluded.length, 2, "B3");
-  assert.equal(result.fetched, 5, "BUG B3: `fetched` (5) overcounts the 3 distinct elements");
+  assert.equal(result.invalid.length, 1, "invalid collapses");
+  assert.equal(result.excluded.length, 1, "excluded collapses");
+  assert.equal(result.fetched, 3, "`fetched` is the 3 distinct elements, not 6 raw occurrences");
 });
 
 test("collectVenuesForTarget: has no knob for retry/timeout - it always uses fetchOverpass defaults", async (t) => {
