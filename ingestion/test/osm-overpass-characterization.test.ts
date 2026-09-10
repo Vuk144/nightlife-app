@@ -25,6 +25,9 @@
  *       Overpass server `[timeout:…]` budget plus a named margin, so it can
  *       never be shorter than the server timeout again. Guarded by
  *       `[B4 regression]`.
+ *   B5  FIXED (Step 6D) — a retryable HTTP response now has its body cancelled
+ *       (`response.body?.cancel()`) before the back-off, releasing the socket.
+ *       Guarded by `[B5 regression]`. The definitive-error path is out of scope.
  *
  * The fake-`fetch` + mock-timer pattern mirrors `test/events/http.test.ts`.
  */
@@ -179,6 +182,12 @@ interface FakeRes {
   json?: unknown;
   /** When true, `response.json()` rejects (unparseable body). */
   jsonThrows?: boolean;
+  /**
+   * When set, the fake exposes a `response.body` whose `cancel()` invokes this
+   * (so a test can observe the transport releasing an un-read error body).
+   * Left unset → `body` is `null`, exactly as before.
+   */
+  onBodyCancel?: () => void;
 }
 
 /** A step the fake `fetch` replays: a response, a thrown error, or "hang until aborted". */
@@ -190,7 +199,13 @@ function fakeResponse(o: FakeRes): Response {
     status: o.status,
     url: "",
     headers: { get: () => null },
-    body: null,
+    body: o.onBodyCancel
+      ? {
+          cancel: async () => {
+            o.onBodyCancel?.();
+          },
+        }
+      : null,
     json: async () => {
       if (o.jsonThrows) throw new SyntaxError("Unexpected token < in JSON at position 0");
       return o.json ?? {};
@@ -568,6 +583,68 @@ test("fetchOverpass: [B4 regression] the default client timeout still eventually
   } finally {
     t.mock.timers.reset();
   }
+});
+
+test("fetchOverpass: [B5 regression] every retryable status cancels its body BEFORE the back-off, then retries", async (t) => {
+  for (const status of [429, 502, 503, 504]) {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let cancels = 0;
+      const { calls } = installFetch(t, [
+        { status, onBodyCancel: () => { cancels += 1; } },
+        elementsBody([]),
+      ]);
+
+      let settled: "resolved" | { err: unknown } | undefined;
+      void fetchOverpass(QUERY, CONFIG, { attempts: 3 }).then(
+        () => (settled = "resolved"),
+        (err) => (settled = { err }),
+      );
+
+      // Drain microtasks only — do NOT advance the clock. By now the fixed code
+      // has received the error response, cancelled its body, and parked on the
+      // back-off `sleep`. The retry has NOT fired yet.
+      for (let n = 0; n < 20 && cancels === 0 && !settled; n++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      assert.equal(cancels, 1, `HTTP ${status}: body cancelled before the back-off`);
+      assert.equal(calls.length, 1, `HTTP ${status}: retry has not fired — still on the back-off`);
+      assert.equal(settled, undefined, `HTTP ${status}: not settled during the back-off`);
+
+      // Let the back-off elapse → the retry fires and the 200 succeeds.
+      for (let n = 0; n < 20 && !settled; n++) {
+        await new Promise((r) => setImmediate(r));
+        if (!settled) t.mock.timers.tick(10_000);
+      }
+      assert.equal(settled, "resolved", `HTTP ${status}: the retry still happens exactly as before`);
+      assert.equal(calls.length, 2, `HTTP ${status}: exactly one retry`);
+      assert.equal(cancels, 1, `HTTP ${status}: only the error body was cancelled`);
+    } finally {
+      t.mock.timers.reset();
+    }
+  }
+});
+
+test("fetchOverpass: [B5 regression] a successful response body is NOT cancelled", async (t) => {
+  let cancels = 0;
+  installFetch(t, [
+    { status: 200, json: { elements: [] }, onBodyCancel: () => { cancels += 1; } },
+  ]);
+
+  const res = await fetchOverpass(QUERY, CONFIG, { attempts: 1 });
+
+  assert.deepEqual(res, { elements: [] });
+  assert.equal(cancels, 0, "a 2xx body is consumed by json(), never cancelled");
+});
+
+test("fetchOverpass: [B5 regression] a non-retryable response fails fast without cancelling its body (B1 boundary)", async (t) => {
+  let cancels = 0;
+  const { calls } = installFetch(t, [{ status: 400, onBodyCancel: () => { cancels += 1; } }]);
+
+  await assert.rejects(fetchOverpass(QUERY, CONFIG, { attempts: 3 }), /HTTP 400/);
+
+  assert.equal(calls.length, 1, "B1: one request, no retry");
+  assert.equal(cancels, 0, "the definitive-error path is out of B5 scope — body not cancelled");
 });
 
 test("fetchOverpass: with options omitted it makes up to 3 attempts (default `attempts`)", async (t) => {

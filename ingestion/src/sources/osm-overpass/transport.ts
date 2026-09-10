@@ -71,6 +71,14 @@ export async function fetchOverpass(
           console.warn(
             `  Overpass HTTP ${response.status}; retrying in ${backoff / 1000}s (attempt ${attempt}/${attempts})`,
           );
+          // Discard the un-read error body so its connection is released back to
+          // the pool before the back-off — otherwise every retry leaks a socket
+          // (undici holds the connection open until the body is consumed).
+          try {
+            await response.body?.cancel();
+          } catch {
+            // stream already closed / errored — nothing left to release
+          }
           await sleep(backoff);
           continue;
         }
