@@ -42,8 +42,18 @@ type TagFilter =
   | { key: string; eq: string }
   | { key: string; matches: string; caseInsensitive?: boolean };
 
-/** One Overpass tag filter: `["k"]`, `["k"="v"]`, or `["k"~"re"[,i]]`. */
-function tagFilter(f: TagFilter): string {
+/**
+ * One Overpass tag filter: `["k"]`, `["k"="v"]`, or `["k"~"re"[,i]]`.
+ *
+ * `matches` is interpolated into the `~"…"` regex position **verbatim** — it is
+ * NOT escaped, because callers pass deliberate regex: `^(a|b)$` alternations
+ * here, the pre-escaped `*_NAME_OVERPASS` vocab from the regional layers, and
+ * `^(escaped)$` from Layer C. Escaping a literal is the caller's job — see
+ * `classify.ts#escapeRegexLiteral` (audit B6).
+ *
+ * Exported for the B6 tests.
+ */
+export function tagFilter(f: TagFilter): string {
   if ("eq" in f) return `["${f.key}"="${f.eq}"]`;
   if ("matches" in f) {
     return `["${f.key}"~"${f.matches}"${f.caseInsensitive ? ",i" : ""}]`;
@@ -105,9 +115,10 @@ function layerAClauses(): string[] {
 // ── Regional name layers (Serbia / Balkans) ────────────────────────
 
 /**
- * Base amenities + a curated case-insensitive name regex. The amenity set and
- * its order differ per layer, so each is spelled out. The name regexes are the
- * canonical vocab from classify.ts (still raw here — see audit B6).
+ * Base amenities + a curated case-insensitive name pattern. The amenity set and
+ * its order differ per layer, so each is spelled out. Each `namePattern` is a
+ * `*_NAME_OVERPASS` alternation from classify.ts — every term already
+ * regex-escaped, `|`-joined (audit B6).
  */
 const REGIONAL_NAME_LAYERS: readonly {
   amenities: readonly string[];

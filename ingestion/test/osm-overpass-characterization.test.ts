@@ -28,6 +28,11 @@
  *   B5  FIXED (Step 6D) — a retryable HTTP response now has its body cancelled
  *       (`response.body?.cancel()`) before the back-off, releasing the socket.
  *       Guarded by `[B5 regression]`. The definitive-error path is out of scope.
+ *   B6  FIXED (Step 6F) — regional vocabulary terms (KAFANA / SPLAV / SHISHA)
+ *       are regex-escaped per term (`classify.ts#escapeRegexLiteral`) before the
+ *       `|`-join, so a metacharacter term cannot reshape the Overpass regex.
+ *       Guarded by `[B6 regression]`. Shipped vocab is alphabetic → query output
+ *       byte-for-byte unchanged.
  *
  * The fake-`fetch` + mock-timer pattern mirrors `test/events/http.test.ts`.
  */
@@ -40,12 +45,21 @@ import {
   parseOverpassVenues,
   collectVenuesForTarget,
 } from "../src/sources/osm-overpass.ts";
-import { OVERPASS_SERVER_TIMEOUT_S } from "../src/sources/osm-overpass/query.ts";
+import {
+  OVERPASS_SERVER_TIMEOUT_S,
+  tagFilter,
+} from "../src/sources/osm-overpass/query.ts";
 import {
   CLIENT_TIMEOUT_MARGIN_MS,
   DEFAULT_CLIENT_TIMEOUT_MS,
 } from "../src/sources/osm-overpass/transport.ts";
 import { rescueNameOverpass } from "../src/rescue.ts";
+import {
+  escapeRegexLiteral,
+  KAFANA_NAME_OVERPASS,
+  SHISHA_NAME_OVERPASS,
+  SPLAV_NAME_OVERPASS,
+} from "../src/classify.ts";
 import type { Config } from "../src/config.ts";
 import type { IngestionTarget } from "../src/targets.ts";
 import type { OverpassElement, OverpassResponse } from "../src/types.ts";
@@ -170,6 +184,91 @@ test("buildOverpassQuery: a target with no rescue rows and no rescue refs has no
   // the union still closes straight after the brewery clauses:
   assert.match(q, /nwr\["craft"="brewery"\]\["amenity"~"\^\(bar\|pub\)\$"\]\(area\.bg\);\n\);\nout tags center;$/);
   assert.doesNotMatch(q, /\r/);
+});
+
+// ────────────────────────────────────────────────────────────────────
+//  B6 — regional vocabulary terms (KAFANA / SPLAV / SHISHA) are now
+//  regex-escaped PER TERM before being `|`-joined into a `*_NAME_OVERPASS`
+//  alternation (classify.ts#escapeRegexLiteral). `tagFilter` still passes
+//  `matches` through verbatim — deliberate-regex callers (Layer A/B/C) rely
+//  on that. Layer C rescue-name escaping (rescue.ts) is a separate, untouched
+//  mechanism.
+// ────────────────────────────────────────────────────────────────────
+
+test("[B6 regression] escapeRegexLiteral escapes each regex metacharacter literally", () => {
+  assert.equal(escapeRegexLiteral("a.b"), "a\\.b");
+  assert.equal(escapeRegexLiteral("a+b"), "a\\+b");
+  assert.equal(escapeRegexLiteral("a*b"), "a\\*b");
+  assert.equal(escapeRegexLiteral("a?b"), "a\\?b");
+  assert.equal(escapeRegexLiteral("a(b)c"), "a\\(b\\)c");
+  assert.equal(escapeRegexLiteral("a[b]c"), "a\\[b\\]c");
+  assert.equal(escapeRegexLiteral("a{2}b"), "a\\{2\\}b");
+  assert.equal(escapeRegexLiteral("^a$"), "\\^a\\$");
+  assert.equal(escapeRegexLiteral("a\\b"), "a\\\\b");
+  // a literal `|` INSIDE one term is escaped — the alternation `|` is added by
+  // `.join("|")`, separately, and must stay unescaped.
+  assert.equal(escapeRegexLiteral("a|b"), "a\\|b");
+});
+
+test("[B6 regression] escapeRegexLiteral leaves plain / Cyrillic / diacritic terms unchanged", () => {
+  for (const term of ["kafana", "hookah", "кафана", "Механа", "krčma", "čarda", "наргил"]) {
+    assert.equal(escapeRegexLiteral(term), term);
+  }
+});
+
+test("[B6 regression] regional vocab is escaped PER TERM — not whole-string, not raw", () => {
+  const pattern = ["foo.bar", "bar+baz"].map(escapeRegexLiteral).join("|");
+
+  assert.equal(pattern, "foo\\.bar|bar\\+baz");
+  assert.notEqual(pattern, "foo.bar|bar+baz", "not raw");
+  assert.notEqual(
+    pattern,
+    escapeRegexLiteral("foo.bar|bar+baz"),
+    "not whole-string escaped — that would escape the alternation `|` too",
+  );
+  // whole-string escaping would kill the alternation:
+  assert.equal(escapeRegexLiteral("foo.bar|bar+baz"), "foo\\.bar\\|bar\\+baz");
+});
+
+test("[B6 regression] the `|` between vocabulary terms stays intentional alternation", () => {
+  assert.equal(["a", "b", "c"].map(escapeRegexLiteral).join("|"), "a|b|c");
+  // the shipped patterns keep their term-separating pipes:
+  assert.ok(KAFANA_NAME_OVERPASS.includes("|"));
+  assert.ok(SPLAV_NAME_OVERPASS.includes("|"));
+  assert.ok(SHISHA_NAME_OVERPASS.includes("|"));
+});
+
+test("[B6 regression] tagFilter still passes `matches` through verbatim (deliberate-regex callers)", () => {
+  // Layer A/B pass `^(a|b)$`; the regional layers pass the pre-escaped vocab;
+  // Layer C passes `^(escaped)$`. tagFilter must NOT auto-escape any of them.
+  assert.equal(tagFilter({ key: "amenity", matches: "^(bar|pub)$" }), '["amenity"~"^(bar|pub)$"]');
+  assert.equal(tagFilter({ key: "name", matches: "a\\.b", caseInsensitive: true }), '["name"~"a\\.b",i]');
+  assert.equal(tagFilter({ key: "name", matches: "kafana", caseInsensitive: true }), '["name"~"kafana",i]');
+});
+
+test("[B6 regression] the shipped regional vocab query output is UNCHANGED by escaping", () => {
+  // Every shipped term is alphabetic, so escaping is a no-op — the exact
+  // `*_NAME_OVERPASS` strings, and the generated query, are byte-for-byte
+  // identical to before the fix.
+  assert.equal(
+    KAFANA_NAME_OVERPASS,
+    "kafana|кафана|Кафана|mehana|meana|механа|Механа|birtija|биртија|Биртија|krčma|krcma|крчма|Крчма|taverna|таверна|Таверна|čarda|carda|чарда|Чарда",
+  );
+  assert.equal(SPLAV_NAME_OVERPASS, "splav|сплав|Сплав");
+  assert.equal(SHISHA_NAME_OVERPASS, "shisha|hookah|nargila|nargile|narghile|наргил|наргил");
+
+  const q = buildOverpassQuery(BELGRADE);
+  assert.ok(q.includes(`["name"~"${KAFANA_NAME_OVERPASS}",i]`));
+  assert.ok(q.includes(`["name"~"${SPLAV_NAME_OVERPASS}",i]`));
+  assert.ok(q.includes(`["name"~"${SHISHA_NAME_OVERPASS}",i]`));
+});
+
+test("[B6 regression] Layer C rescue-name escaping is a SEPARATE mechanism, untouched", () => {
+  // Layer C escaping lives in rescue.ts (`escapeRegex`, private) + the `^(…)$`
+  // wrap in query.ts#layerCClauses — none of which this fix touches.
+  // `escapeRegexLiteral` (classify.ts) is only for the regional layers.
+  assert.equal(rescueNameOverpass("RS", "Belgrade"), "", "shipped config: every rescue is ref'd");
+  assert.equal(typeof escapeRegexLiteral, "function");
 });
 
 // ════════════════════════════════════════════════════════════════════
