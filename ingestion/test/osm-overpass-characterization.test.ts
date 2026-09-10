@@ -13,8 +13,9 @@
  *   B1  FIXED (Step 5) — a non-retryable HTTP status (400/401/403/404/500/…) now
  *       fails fast: it never enters the generic retry `catch`, so no second
  *       request and no back-off. Guarded by the `[B1 regression]` tests below.
- *   B2  an Overpass 200 that carries a `remark` AND a (partial) `elements`
- *       array is returned as a success — a truncated result is not detected.
+ *   B2  FIXED (Step 6A) — an Overpass 200 with a meaningful top-level `remark`
+ *       is now a (transient) failure whether or not `elements` is present; a
+ *       degraded / partial result is never accepted. Guarded by `[B2 regression]`.
  *   B3  `parseOverpassVenues` deduplicates accepted venues only; duplicate
  *       `invalid` / `excluded` elements from overlapping query clauses are
  *       counted twice and inflate `fetched`.
@@ -386,22 +387,42 @@ test("fetchOverpass: a 200 with a `remark` and no `elements` array is a hard fai
   );
 });
 
-test("fetchOverpass: [characterizes bug B2] a 200 with a `remark` AND a partial `elements` array is returned as success", async (t) => {
-  // CURRENT behavior: the remark guard only fires when `elements` is NOT an
-  // array. Overpass emits `remark` + a truncated `elements` list when a query
-  // times out mid-run; that truncated payload is handed back as if complete.
-  const partial = {
+const TIMEOUT_REMARK =
+  "runtime error: Query timed out in 'query' at line 3 after 240 seconds.";
+
+test("fetchOverpass: [B2 regression] a 200 with a meaningful `remark` and EMPTY `elements` is a failure", async (t) => {
+  installFetch(t, [{ status: 200, json: { remark: TIMEOUT_REMARK, elements: [] } }]);
+
+  await assert.rejects(
+    fetchOverpass(QUERY, CONFIG, { attempts: 1 }),
+    /Overpass returned an error remark: runtime error: Query timed out/,
+  );
+});
+
+test("fetchOverpass: [B2 regression] a 200 with a meaningful `remark` and PARTIAL `elements` is a failure", async (t) => {
+  // Overpass emits `remark` + a truncated `elements` list when a query times out
+  // mid-run. That degraded payload must not be accepted as a partial success.
+  const json = {
+    remark: TIMEOUT_REMARK,
     elements: [{ type: "node", id: 1, lat: 44.8, lon: 20.4, tags: { amenity: "bar", name: "A" } }],
-    remark: "runtime error: Query timed out in 'query' at line 3 after 240 seconds.",
   };
-  installFetch(t, [{ status: 200, json: partial }]);
+  installFetch(t, [{ status: 200, json }]);
 
-  const res = (await fetchOverpass(QUERY, CONFIG, { attempts: 1 })) as OverpassResponse & {
-    remark?: string;
-  };
+  await assert.rejects(
+    fetchOverpass(QUERY, CONFIG, { attempts: 1 }),
+    /Overpass returned an error remark: runtime error: Query timed out/,
+  );
+});
 
-  assert.equal(res.elements?.length, 1, "BUG B2: truncated result accepted");
-  assert.equal(res.remark, partial.remark, "BUG B2: the timeout remark is ignored, not surfaced");
+test("fetchOverpass: [B2 regression] a `remark` response is transient — retried, then fails after `attempts`", async (t) => {
+  const { calls } = installFetch(t, [{ status: 200, json: { remark: TIMEOUT_REMARK, elements: [] } }]);
+
+  const { value, error } = await run(t, () => fetchOverpass(QUERY, CONFIG, { attempts: 3 }));
+
+  assert.equal(value, undefined);
+  assert.equal(calls.length, 3, "a `remark` response is retried like other transient failures");
+  assert.match((error as Error).message, /Overpass request failed after 3 attempts/);
+  assert.match((error as Error).message, /Overpass returned an error remark/);
 });
 
 test("fetchOverpass: a 200 with no `elements` array and no `remark` is a hard failure", async (t) => {

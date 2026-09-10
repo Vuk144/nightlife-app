@@ -75,10 +75,12 @@ export async function fetchOverpass(
       const payload = (await response.json()) as OverpassResponse & {
         remark?: string;
       };
-      // Overloaded Overpass instances answer 200 with an error in `remark` and
-      // no `elements`. Treat that as a transient failure, not an empty city —
-      // a silent zero-result fetch must never look like a successful sync.
-      if (typeof payload.remark === "string" && !Array.isArray(payload.elements)) {
+      // Overloaded / timed-out Overpass instances answer 200 with a top-level
+      // `remark` (timeout / out of memory / "reduce load"), often alongside an
+      // empty or truncated `elements` list. Treat any meaningful remark as a
+      // transient failure, not a partial success — a degraded fetch must never
+      // look like a successful sync.
+      if (typeof payload.remark === "string" && payload.remark.trim() !== "") {
         throw new Error(`Overpass returned an error remark: ${payload.remark}`);
       }
       if (!Array.isArray(payload.elements)) {
