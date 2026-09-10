@@ -260,6 +260,15 @@ export function buildOverpassQuery(target: IngestionTarget): string {
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
+/** Default number of Overpass request attempts (overridable via `options.attempts`). */
+const DEFAULT_ATTEMPTS = 3;
+
+/** Linear back-off base: attempt N sleeps `RETRY_BASE_BACKOFF_MS * N` before retrying. */
+const RETRY_BASE_BACKOFF_MS = 5_000;
+
+/** Default per-attempt client abort timeout, ms (overridable via `options.timeoutMs`). */
+const DEFAULT_CLIENT_TIMEOUT_MS = 180_000;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -274,8 +283,8 @@ export async function fetchOverpass(
   config: Config,
   options: { attempts?: number; timeoutMs?: number } = {},
 ): Promise<OverpassResponse> {
-  const attempts = options.attempts ?? 3;
-  const timeoutMs = options.timeoutMs ?? 180_000;
+  const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CLIENT_TIMEOUT_MS;
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -295,7 +304,7 @@ export async function fetchOverpass(
 
       if (!response.ok) {
         if (RETRYABLE_STATUS.has(response.status) && attempt < attempts) {
-          const backoff = 5_000 * attempt;
+          const backoff = RETRY_BASE_BACKOFF_MS * attempt;
           console.warn(
             `  Overpass HTTP ${response.status}; retrying in ${backoff / 1000}s (attempt ${attempt}/${attempts})`,
           );
@@ -321,7 +330,7 @@ export async function fetchOverpass(
     } catch (error) {
       lastError = error;
       if (attempt < attempts) {
-        const backoff = 5_000 * attempt;
+        const backoff = RETRY_BASE_BACKOFF_MS * attempt;
         console.warn(
           `  Overpass request error (${(error as Error).message}); retrying in ${backoff / 1000}s (attempt ${attempt}/${attempts})`,
         );
