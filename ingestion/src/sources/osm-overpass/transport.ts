@@ -1,5 +1,6 @@
 import type { Config } from "../../config.ts";
 import type { OverpassResponse } from "../../types.ts";
+import { OVERPASS_SERVER_TIMEOUT_S } from "./query.ts";
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
@@ -9,8 +10,21 @@ const DEFAULT_ATTEMPTS = 3;
 /** Linear back-off base: attempt N sleeps `RETRY_BASE_BACKOFF_MS * N` before retrying. */
 const RETRY_BASE_BACKOFF_MS = 5_000;
 
-/** Default per-attempt client abort timeout, ms (overridable via `options.timeoutMs`). */
-const DEFAULT_CLIENT_TIMEOUT_MS = 180_000;
+/**
+ * Slack the client waits *beyond* the server's own `[timeout:…]` budget before
+ * aborting — covers the Overpass queue wait before execution starts, the
+ * transfer + JSON parse of a whole-city result, and connection setup.
+ */
+export const CLIENT_TIMEOUT_MARGIN_MS = 60_000;
+
+/**
+ * Default per-attempt client abort timeout, ms (overridable via
+ * `options.timeoutMs`). Derived from the server's declared execution budget
+ * plus a margin so the client never aborts a request Overpass would still
+ * answer within its own `[timeout:…]`.
+ */
+export const DEFAULT_CLIENT_TIMEOUT_MS =
+  OVERPASS_SERVER_TIMEOUT_S * 1000 + CLIENT_TIMEOUT_MARGIN_MS;
 
 /**
  * A non-retryable HTTP response from Overpass — a definitive failure. Thrown so

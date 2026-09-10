@@ -21,6 +21,10 @@
  *       `excluded` element is processed and counted once; `fetched` reflects
  *       unique elements. Guarded by `[B3 regression]`. Elements with no
  *       resolvable identity (`"(unknown)"`) are still each kept.
+ *   B4  FIXED (Step 6C) — the default client abort timeout is derived from the
+ *       Overpass server `[timeout:…]` budget plus a named margin, so it can
+ *       never be shorter than the server timeout again. Guarded by
+ *       `[B4 regression]`.
  *
  * The fake-`fetch` + mock-timer pattern mirrors `test/events/http.test.ts`.
  */
@@ -33,6 +37,11 @@ import {
   parseOverpassVenues,
   collectVenuesForTarget,
 } from "../src/sources/osm-overpass.ts";
+import { OVERPASS_SERVER_TIMEOUT_S } from "../src/sources/osm-overpass/query.ts";
+import {
+  CLIENT_TIMEOUT_MARGIN_MS,
+  DEFAULT_CLIENT_TIMEOUT_MS,
+} from "../src/sources/osm-overpass/transport.ts";
 import { rescueNameOverpass } from "../src/rescue.ts";
 import type { Config } from "../src/config.ts";
 import type { IngestionTarget } from "../src/targets.ts";
@@ -494,6 +503,71 @@ test("fetchOverpass: a timed-out attempt is retried before the run ultimately fa
   assert.equal(value, undefined);
   assert.equal(calls.length, 3, "each timeout is retried");
   assert.match((error as Error).message, /Overpass request failed after 3 attempts/);
+});
+
+test("fetchOverpass: [B4 regression] with the default timeout the client does NOT abort before the server's 240s budget", async (t) => {
+  // The query asks Overpass for `[timeout:240]`. With the default client
+  // timeout, a still-pending request at t = 240s must NOT have been aborted —
+  // otherwise the client abandons work the server would still answer and
+  // triggers an avoidable retry.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { calls } = installFetch(t, ["abort-pending"]);
+
+    let settled: "resolved" | { err: unknown } | undefined;
+    void fetchOverpass(QUERY, CONFIG, { attempts: 1 }).then(
+      () => (settled = "resolved"),
+      (err) => (settled = { err }),
+    );
+
+    t.mock.timers.tick(240_000); // exactly the Overpass server-side budget
+    for (let n = 0; n < 20 && !settled; n++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    assert.equal(settled, undefined, "client must still be waiting at t = 240s (server budget)");
+    assert.equal(calls.length, 1, "no retry — the client has not timed out");
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
+test("[B4 regression] the default client timeout exceeds the Overpass server timeout by a positive margin", () => {
+  // Future guard: if someone makes the client give up before the server's own
+  // `[timeout:…]` budget again, this fails loudly.
+  const serverMs = OVERPASS_SERVER_TIMEOUT_S * 1000;
+
+  assert.ok(
+    DEFAULT_CLIENT_TIMEOUT_MS > serverMs,
+    `client ${DEFAULT_CLIENT_TIMEOUT_MS}ms must exceed server ${serverMs}ms`,
+  );
+  assert.ok(CLIENT_TIMEOUT_MARGIN_MS > 0, "the safety margin must be positive");
+  assert.equal(DEFAULT_CLIENT_TIMEOUT_MS, serverMs + CLIENT_TIMEOUT_MARGIN_MS);
+});
+
+test("fetchOverpass: [B4 regression] the default client timeout still eventually aborts a hung request", async (t) => {
+  // 3d — the abort/retry mechanism is unchanged; only the default duration grew.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { calls } = installFetch(t, ["abort-pending"]);
+
+    let settled: "resolved" | { err: unknown } | undefined;
+    void fetchOverpass(QUERY, CONFIG, { attempts: 1 }).then(
+      () => (settled = "resolved"),
+      (err) => (settled = { err }),
+    );
+
+    t.mock.timers.tick(DEFAULT_CLIENT_TIMEOUT_MS + 1_000);
+    for (let n = 0; n < 20 && !settled; n++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    assert.ok(settled && typeof settled === "object", "aborts once the default timeout elapses");
+    assert.match((settled as { err: Error }).err.message, /abort/i);
+    assert.equal(calls.length, 1);
+  } finally {
+    t.mock.timers.reset();
+  }
 });
 
 test("fetchOverpass: with options omitted it makes up to 3 attempts (default `attempts`)", async (t) => {

@@ -12,8 +12,12 @@ const OVERPASS_AREA_OFFSET = 3_600_000_000;
 
 // ── Overpass QL framing ─────────────────────────────────────────────
 
-/** Overpass server-side execution budget, seconds (`timeout:` in the settings line). */
-const OVERPASS_SERVER_TIMEOUT_S = 240;
+/**
+ * Overpass server-side execution budget, seconds (`timeout:` in the settings
+ * line). Exported so the transport layer can keep its client abort timeout
+ * strictly longer than this — see `transport.ts#DEFAULT_CLIENT_TIMEOUT_MS`.
+ */
+export const OVERPASS_SERVER_TIMEOUT_S = 240;
 
 /** QL settings line — JSON output plus the server timeout. */
 const OVERPASS_SETTINGS = `[out:json][timeout:${OVERPASS_SERVER_TIMEOUT_S}];`;
