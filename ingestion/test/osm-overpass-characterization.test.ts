@@ -6,13 +6,13 @@
  * `collectVenuesForTarget` so a later behavior-preserving refactor is provably
  * safe.
  *
- * A few tests intentionally pin KNOWN BUGS from the audit — each is tagged
- * `[characterizes bug Bn]`. When the corresponding fix lands, that test must be
- * UPDATED (not deleted) to describe the corrected behavior:
+ * A test that pins a KNOWN BUG from the audit is tagged `[characterizes bug Bn]`;
+ * once the fix lands it is UPDATED (not deleted) into a `[Bn regression]` that
+ * locks the corrected behavior.
  *
- *   B1  a non-retryable HTTP status (e.g. 400) is still retried `attempts`
- *       times, because the "definitive failure" throw is caught by the generic
- *       retry `catch`.
+ *   B1  FIXED (Step 5) — a non-retryable HTTP status (400/401/403/404/500/…) now
+ *       fails fast: it never enters the generic retry `catch`, so no second
+ *       request and no back-off. Guarded by the `[B1 regression]` tests below.
  *   B2  an Overpass 200 that carries a `remark` AND a (partial) `elements`
  *       array is returned as a success — a truncated result is not detected.
  *   B3  `parseOverpassVenues` deduplicates accepted venues only; duplicate
@@ -329,27 +329,51 @@ test("fetchOverpass: every retryable-status attempt fails -> throws after `attem
   assert.match((error as Error).message, /HTTP 503/);
 });
 
-test("fetchOverpass: [characterizes bug B1] a NON-retryable 400 is still retried `attempts` times", async (t) => {
-  // CURRENT behavior: line 152 throws `Overpass request failed: HTTP 400`
-  // from inside the `try`, so the generic `catch` re-runs it up to `attempts`
-  // times. A malformed query (400) SHOULD fail fast on the first response.
-  const { calls } = installFetch(t, [{ status: 400 }]);
+test("fetchOverpass: [B1 regression] a non-retryable HTTP status fails fast — one request, no back-off", async (t) => {
+  // A non-retryable response (400/401/403/404/500/…) is a DEFINITIVE failure: it
+  // must not enter the generic retry `catch`, so no second request and no
+  // back-off sleep, whatever `attempts` says. Fake timers are enabled but the
+  // clock is NEVER advanced — if a back-off were scheduled the call could not
+  // settle here and `assert.ok(settled)` fails.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    for (const status of [400, 401, 404, 500]) {
+      const { calls } = installFetch(t, [{ status }]);
 
-  const { value, error } = await run(t, () => fetchOverpass(QUERY, CONFIG, { attempts: 3 }));
+      let settled: { err: unknown } | "resolved" | undefined;
+      void fetchOverpass(QUERY, CONFIG, { attempts: 3 }).then(
+        () => (settled = "resolved"),
+        (err) => (settled = { err }),
+      );
+      for (let n = 0; n < 20 && !settled; n++) {
+        await new Promise((r) => setImmediate(r));
+      }
 
-  assert.equal(value, undefined);
-  assert.equal(calls.length, 3, "BUG B1: a 400 is retried 3x instead of failing fast");
-  assert.match((error as Error).message, /Overpass request failed after 3 attempts/);
-  assert.match((error as Error).message, /HTTP 400/);
+      assert.ok(settled, `HTTP ${status}: must settle with no timer delay`);
+      assert.notEqual(settled, "resolved", `HTTP ${status}: must reject`);
+      const message = ((settled as { err: Error }).err).message;
+      assert.match(message, new RegExp(`HTTP ${status}`), `HTTP ${status}: error names the status`);
+      assert.doesNotMatch(
+        message,
+        /after \d+ attempts/,
+        `HTTP ${status}: failed on the first response, not after exhausting retries`,
+      );
+      assert.equal(calls.length, 1, `HTTP ${status}: exactly one request — never retried`);
+    }
+  } finally {
+    t.mock.timers.reset();
+  }
 });
 
-test("fetchOverpass: a single-attempt non-retryable 400 throws after one call", async (t) => {
+test("fetchOverpass: [B1 regression] a non-retryable 400 with attempts:1 rejects with the unwrapped HTTP error", async (t) => {
   const { calls } = installFetch(t, [{ status: 400 }]);
 
-  await assert.rejects(
-    fetchOverpass(QUERY, CONFIG, { attempts: 1 }),
-    /Overpass request failed after 1 attempts: Overpass request failed: HTTP 400/,
-  );
+  await assert.rejects(fetchOverpass(QUERY, CONFIG, { attempts: 1 }), (err: unknown) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /Overpass request failed: HTTP 400/);
+    assert.doesNotMatch(err.message, /after \d+ attempts/);
+    return true;
+  });
   assert.equal(calls.length, 1);
 });
 

@@ -12,6 +12,12 @@ const RETRY_BASE_BACKOFF_MS = 5_000;
 /** Default per-attempt client abort timeout, ms (overridable via `options.timeoutMs`). */
 const DEFAULT_CLIENT_TIMEOUT_MS = 180_000;
 
+/**
+ * A non-retryable HTTP response from Overpass — a definitive failure. Thrown so
+ * the retry `catch` can re-raise it immediately instead of retrying it.
+ */
+class DefinitiveHttpError extends Error {}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -54,7 +60,16 @@ export async function fetchOverpass(
           await sleep(backoff);
           continue;
         }
-        throw new Error(`Overpass request failed: HTTP ${response.status}`);
+        // A retryable status that has exhausted its attempts still flows through
+        // the generic "after N attempts" wrapper (unchanged). A non-retryable
+        // status is definitive: throw a marker the retry `catch` re-raises at
+        // once, so no further request is made.
+        if (RETRYABLE_STATUS.has(response.status)) {
+          throw new Error(`Overpass request failed: HTTP ${response.status}`);
+        }
+        throw new DefinitiveHttpError(
+          `Overpass request failed: HTTP ${response.status}`,
+        );
       }
 
       const payload = (await response.json()) as OverpassResponse & {
@@ -71,6 +86,8 @@ export async function fetchOverpass(
       }
       return payload;
     } catch (error) {
+      // A definitive HTTP failure never retries — re-raise it as-is.
+      if (error instanceof DefinitiveHttpError) throw error;
       lastError = error;
       if (attempt < attempts) {
         const backoff = RETRY_BASE_BACKOFF_MS * attempt;
