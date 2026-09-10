@@ -57,7 +57,13 @@ export const SHISHA_NAME_REGEX = new RegExp(SHISHA_TERMS.join("|"), "i");
 const NAME_BASE_AMENITIES = new Set(["restaurant", "bar", "pub", "cafe"]);
 
 // ── Layer B base categories ──────────────────────────────────────────
-const LAYER_B_AMENITIES = new Set([
+/**
+ * Canonical Layer B base-amenity list — the single source of truth.
+ * `classifyOsmElement` uses it to accept post-fetch; `sources/osm-overpass.ts`
+ * consumes the same set to server-gate the Layer B query clauses. Insertion
+ * order is the query's alternation order, so keep it stable.
+ */
+export const LAYER_B_AMENITIES = new Set([
   "restaurant",
   "cafe",
   "theatre",
