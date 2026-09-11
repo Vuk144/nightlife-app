@@ -61,24 +61,39 @@ export function resolveMatch(
   if (t0) return { kind: "match", tier: 0, venue: t0 };
 
   // ---- Tier 1: shared canonical identifier -----------------------------
+  // Like Tier 2, collect ALL free candidates and refuse to guess: 2+ existing
+  // venues sharing a QID or a dedicated domain (neither column is unique) is a
+  // genuine ambiguity, not a match.
   if (incoming.wikidata) {
-    const byQid = ctx.existing.find(
+    const byQid = ctx.existing.filter(
       (v) => free(v) && v.wikidata != null && v.wikidata === incoming.wikidata,
     );
-    if (byQid) {
-      return { kind: "match", tier: 1, venue: byQid, note: `wikidata ${incoming.wikidata}` };
+    if (byQid.length === 1) {
+      return { kind: "match", tier: 1, venue: byQid[0], note: `wikidata ${incoming.wikidata}` };
+    }
+    if (byQid.length > 1) {
+      return {
+        kind: "skip",
+        note: `ambiguous: ${byQid.length} existing venues share wikidata ${incoming.wikidata}`,
+      };
     }
   }
   if (incoming.website) {
-    const byDomain = ctx.existing.find(
+    const byDomain = ctx.existing.filter(
       (v) => free(v) && sameDedicatedDomain(v.website, incoming.website),
     );
-    if (byDomain) {
+    if (byDomain.length === 1) {
       return {
         kind: "match",
         tier: 1,
-        venue: byDomain,
+        venue: byDomain[0],
         note: `website domain ${apexDomain(incoming.website)}`,
+      };
+    }
+    if (byDomain.length > 1) {
+      return {
+        kind: "skip",
+        note: `ambiguous: ${byDomain.length} existing venues share website domain ${apexDomain(incoming.website)}`,
       };
     }
   }

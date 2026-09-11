@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyOsmElement, nightlifeSignal } from "../src/classify.ts";
+import {
+  classifyOsmElement,
+  nightlifeSignal,
+  KAFANA_NAME_OVERPASS,
+  KAFANA_NAME_REGEX,
+  SHISHA_NAME_OVERPASS,
+  SHISHA_NAME_REGEX,
+  SPLAV_NAME_OVERPASS,
+  SPLAV_NAME_REGEX,
+} from "../src/classify.ts";
 import type { IngestionTarget } from "../src/targets.ts";
 
 const BELGRADE: IngestionTarget = {
@@ -174,4 +183,172 @@ test("nightlifeSignal returns the strongest tier found", () => {
   assert.equal(sig({ cuisine: "pizza" }).strength, "none");
   assert.equal(sig({ smoking: "yes", live_music: "yes" }).strength, "strong");
   assert.match(sig({}, "cafe", "Jazz Club Foo").reason ?? "", /music\/performance/);
+});
+
+// ════════════════════════════════════════════════════════════════════════
+//  AUDIT PASS — characterization + one regression (shop=no / office=no)
+// ════════════════════════════════════════════════════════════════════════
+
+const TRI_SESIRA_REF = "way/150590534"; // a confirmed Layer C rescue osmRef
+
+// ── REGRESSION — `shop=no` / `office=no` are NEGATIONS, not exclusions ──
+test("[regression] shop=no / office=no must NOT exclude a venue (they mean 'not a shop/office')", () => {
+  assert.equal(accept({ amenity: "bar", shop: "no", name: "Bar not a shop" }), "bar");
+  assert.equal(accept({ amenity: "bar", office: "no", name: "Bar not an office" }), "bar");
+  assert.equal(accept({ amenity: "nightclub", shop: "no", name: "Club" }), "nightclub");
+  // a real shop value still excludes
+  assert.match(reject({ amenity: "bar", shop: "wine", name: "Wine Bar Shop" }), /shop=wine/);
+  assert.match(reject({ amenity: "bar", shop: "vacant", name: "Vacant" }), /shop=vacant/);
+});
+
+// ── hard exclusion beats a curated rescue — every exclusion kind ──
+test("[precedence] every hard-exclusion kind still wins over a rescue osmRef", () => {
+  const withRef = (tags: Record<string, string>) => classifyOsmElement(tags, TRI_SESIRA_REF, BELGRADE);
+  assert.match((withRef({ shop: "wine", name: "Tri šešira" }) as { reason: string }).reason, /shop=wine/);
+  assert.match((withRef({ office: "company", name: "Tri šešira" }) as { reason: string }).reason, /office=company/);
+  assert.match((withRef({ amenity: "fast_food", name: "Tri šešira" }) as { reason: string }).reason, /fast_food/);
+  assert.match((withRef({ "disused:amenity": "restaurant", name: "Tri šešira" }) as { reason: string }).reason, /lifecycle/);
+  assert.match((withRef({ tourism: "hotel", name: "Tri šešira" }) as { reason: string }).reason, /lodging/);
+  assert.match(
+    (withRef({ amenity: "community_centre", community_centre: "for_the_elderly", name: "Tri šešira" }) as { reason: string }).reason,
+    /community_centre/,
+  );
+});
+
+test("[precedence] access=private with no signal is a step-0 exclusion — it blocks even a rescue osmRef", () => {
+  const r = classifyOsmElement({ amenity: "restaurant", access: "private", name: "Tri šešira" }, TRI_SESIRA_REF, BELGRADE);
+  assert.ok(!r.accepted);
+  if (!r.accepted) assert.match(r.reason, /access=private/);
+  // …but a public signal lets the same element through (and the rescue then wins)
+  const withSignal = classifyOsmElement(
+    { amenity: "restaurant", access: "private", live_music: "yes", name: "Tri šešira" },
+    TRI_SESIRA_REF,
+    BELGRADE,
+  );
+  assert.ok(withSignal.accepted && withSignal.rescued === true && withSignal.review === true);
+});
+
+// ── Layer A precedence over Layer B ──
+test("[precedence] a Layer A amenity is accepted at Layer A even when a Layer B path would also apply", () => {
+  // craft=brewery + amenity=bar: Layer A (amenity=bar) fires before Layer B (craft=brewery)
+  const r = classify({ amenity: "bar", craft: "brewery", name: "Craft Bar" });
+  assert.ok(r.accepted);
+  if (r.accepted) assert.match(r.via, /Layer A: amenity=bar/);
+});
+
+// ── Layer A: leisure=dance teaching-school exclusion is unconditional ──
+test("[characterization] leisure=dance + dance:teaching=yes is rejected even with a strong signal", () => {
+  // The teaching-school carve-out is a targeted Layer A sub-rule, not signal-gated.
+  assert.match(
+    reject({ leisure: "dance", "dance:teaching": "yes", live_music: "yes", name: "Dance School w/ concerts" }),
+    /teaching school/,
+  );
+  // a non-teaching dance venue is Layer A
+  assert.equal(accept({ leisure: "dance", name: "Milonga" }), "other_nightlife");
+});
+
+// ── nightlifeSignal: strength selection & tie behaviour ──
+test("[signal] a weaker signal never overwrites a stronger one; equal strength keeps the FIRST", () => {
+  // strong (live_music) + medium (bar=yes on restaurant) -> strong
+  const s1 = sig({ live_music: "yes", bar: "yes" }, "restaurant");
+  assert.equal(s1.strength, "strong");
+  assert.equal(s1.kind, "music");
+  // two strong signals (music + brewery) -> the first considered (music) wins the tie
+  const s2 = sig({ live_music: "yes", microbrewery: "yes" }, "restaurant");
+  assert.equal(s2.strength, "strong");
+  assert.equal(s2.kind, "music");
+});
+
+test("[signal] multiple WEAK signals never combine into a medium/strong", () => {
+  const s = sig({ alcohol: "yes", outdoor_seating: "yes", smoking: "yes", cocktails: "yes" }, "cafe");
+  assert.equal(s.strength, "weak");
+  // …so a plain cafe with only those is still rejected at Layer B
+  assert.match(reject({ amenity: "cafe", alcohol: "yes", outdoor_seating: "yes", name: "Cafe" }), /weak signal/);
+});
+
+test("[signal] NEGATIVE values (no/none/false/0) are not signals", () => {
+  for (const v of ["no", "none", "false", "0"]) {
+    assert.equal(sig({ live_music: v }).strength, "none", `live_music=${v}`);
+    assert.equal(sig({ brewery: v }).strength, "none", `brewery=${v}`);
+  }
+  assert.equal(sig({ bar: "no" }, "restaurant").strength, "none");
+});
+
+// ── regional name layers: matching, case, script, substring ──
+test("[name-layer] kafana/mehana names match Latin & Cyrillic, either case, anywhere in the name", () => {
+  assert.equal(accept({ amenity: "restaurant", name: "Kafana Question" }), "kafana");
+  assert.equal(accept({ amenity: "restaurant", name: "Question KAFANA" }), "kafana");
+  assert.equal(accept({ amenity: "bar", name: "Стара механа" }), "kafana");
+  assert.equal(accept({ amenity: "pub", name: "biRTiJa Foo" }), "kafana");
+  // the amenity gate: a kafana-named element that is NOT restaurant/bar/pub/cafe is not a Band-C kafana
+  reject({ amenity: "theatre", name: "Kafana Theatre" });
+});
+
+test("[name-layer][latent] substring name matching can false-positive on a real word ('carda' ⊂ 'Cardamom')", () => {
+  // KNOWN LIMITATION: `*_NAME_REGEX` matches vocabulary terms as substrings with
+  // no word boundary (a boundary would break the Cyrillic terms — `\b` needs an
+  // ASCII `\w`). The `NAME_BASE_AMENITIES` / amenity gates and the small curated
+  // vocabulary limit the blast radius. Pinned so the risk stays visible.
+  assert.equal(KAFANA_NAME_REGEX.test("Cardamom"), true);
+  assert.equal(classify({ amenity: "restaurant", name: "Cardamom" }).accepted, true); // wrongly -> kafana
+});
+
+test("[name-layer][guard] no regional vocabulary term contains a regex metacharacter", () => {
+  // `*_NAME_OVERPASS` escapes its terms (audit B6); `*_NAME_REGEX` does NOT. That
+  // asymmetry is only safe while every term is a plain literal. If this fails, a
+  // new term needs escaping on the RegExp side too (and check for a load-time
+  // SyntaxError from an unbalanced metacharacter).
+  const META = /[.*+?^${}()|[\]\\]/;
+  for (const pattern of [KAFANA_NAME_OVERPASS, SPLAV_NAME_OVERPASS, SHISHA_NAME_OVERPASS]) {
+    for (const term of pattern.split("|")) {
+      assert.equal(META.test(term), false, `term "${term}" contains a regex metacharacter`);
+    }
+  }
+  // sanity: the raw-term regexes are valid and match their own vocabulary
+  assert.ok(KAFANA_NAME_REGEX.test("kafana"));
+  assert.ok(SPLAV_NAME_REGEX.test("splav"));
+  assert.ok(SHISHA_NAME_REGEX.test("nargila"));
+});
+
+test("[name-layer] splav restaurant: accepted with a signal OR a drinking-venue word, else excluded", () => {
+  const named = classify({ amenity: "restaurant", name: "Splav X Cocktail Bar" });
+  assert.ok(named.accepted && named.review === true);
+  const signalled = classify({ amenity: "restaurant", live_music: "yes", name: "Splav Y" });
+  assert.ok(signalled.accepted && signalled.review === true);
+  assert.match(reject({ amenity: "restaurant", name: "Splav Fish Restaurant" }), /splav restaurant with no nightlife signal/);
+});
+
+// ── Layer C rescue semantics ──
+test("[rescue] a rescue result carries rescued=true and review=true and a 'Layer C rescue' via", () => {
+  const r = classifyOsmElement({ amenity: "restaurant", name: "Tri šešira" }, TRI_SESIRA_REF, BELGRADE);
+  assert.ok(r.accepted);
+  if (r.accepted) {
+    assert.equal(r.rescued, true);
+    assert.equal(r.review, true);
+    assert.match(r.via, /^Layer C rescue: /);
+  }
+});
+
+test("[rescue] no ref or no target -> the rescue list is never consulted", () => {
+  // Tri šešira tagged only as a plain restaurant: without a ref it must NOT rescue
+  assert.ok(!classifyOsmElement({ amenity: "restaurant", name: "Tri šešira" }, undefined, BELGRADE).accepted);
+  assert.ok(!classifyOsmElement({ amenity: "restaurant", name: "Tri šešira" }, TRI_SESIRA_REF, undefined).accepted);
+});
+
+// ── purity / determinism ──
+test("[purity] classifyOsmElement and nightlifeSignal do not mutate their inputs and are deterministic", () => {
+  const tags = { amenity: "restaurant", bar: "yes", live_music: "no", name: "Resto" };
+  const before = JSON.stringify(tags);
+  const a = classifyOsmElement(tags, "node/1", BELGRADE);
+  const b = classifyOsmElement(tags, "node/1", BELGRADE);
+  nightlifeSignal(tags, "restaurant", "Resto");
+  assert.equal(JSON.stringify(tags), before, "tags object untouched");
+  assert.deepEqual(a, b, "same input -> same result");
+});
+
+test("[boundary] empty / minimal / unknown tag shapes", () => {
+  assert.ok(!classifyOsmElement({}, "node/1", BELGRADE).accepted);
+  assert.ok(!classifyOsmElement({ name: "Nameless-amenity" }, "node/1", BELGRADE).accepted);
+  assert.match(reject({ amenity: "parking", name: "Garaža" }), /amenity=parking not in scope/);
+  assert.match(reject({ club: "chess", name: "Šah" }), /club=chess not in scope/);
 });

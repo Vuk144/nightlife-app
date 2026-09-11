@@ -4,12 +4,17 @@
  * its own leaf module to avoid an import cycle.
  */
 
-/** Non-decomposable Latin letters NFKD will not split into base + mark. */
+/**
+ * Non-decomposable Latin letters NFKD will not split into base + mark.
+ * Applied BEFORE lower-casing, so every entry needs BOTH cases — a missing
+ * upper-case form is silently deleted at the `[^a-z0-9]` step instead of
+ * mapped (e.g. Icelandic `Ð` U+00D0, visually identical to Serbian `Đ`).
+ */
 const LATIN_SPECIAL: Record<string, string> = {
-  "đ": "d", "Đ": "d", "ð": "d",
+  "đ": "d", "Đ": "d", "ð": "d", "Ð": "d",
   "ø": "o", "Ø": "o",
   "ł": "l", "Ł": "l",
-  "ß": "ss",
+  "ß": "ss", "ẞ": "ss",
   "æ": "ae", "Æ": "ae",
   "œ": "oe", "Œ": "oe",
 };

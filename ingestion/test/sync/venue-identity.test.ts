@@ -337,30 +337,19 @@ test("[characterization][unreachable] two candidates with the SAME id read as tw
   assert.equal(r.canonicalId, null);
 });
 
-test("[characterization][unreachable] Tier 1 uses first-match on a duplicate identifier — needs a data error AND an unordered store to matter", () => {
-  // Wikidata / dedicated-domain uniqueness is a data invariant; two same-city
-  // venues sharing one is a data error. This pins that IF it happens, the pick
-  // follows candidate order (a `.find()` in matching.ts, not this adapter).
-  const first = resolveVenueIdentity(
-    req({
-      incoming: incoming({ wikidata: "Q1", normalizedName: "zzz" }),
-      existingInCity: [
-        candidate({ id: "v-A", normalizedName: "a", wikidata: "Q1" }),
-        candidate({ id: "v-B", normalizedName: "b", wikidata: "Q1" }),
-      ],
-    }),
-  );
-  const flipped = resolveVenueIdentity(
-    req({
-      incoming: incoming({ wikidata: "Q1", normalizedName: "zzz" }),
-      existingInCity: [
-        candidate({ id: "v-B", normalizedName: "b", wikidata: "Q1" }),
-        candidate({ id: "v-A", normalizedName: "a", wikidata: "Q1" }),
-      ],
-    }),
-  );
-  assert.equal(first.canonicalId, "v-A");
-  assert.equal(flipped.canonicalId, "v-B");
+test("[ambiguity] two existing venues sharing a Wikidata QID -> ambiguous / canonicalId null, in either candidate order", () => {
+  // matching.ts Tier 1 counts all matching candidates and refuses to guess when
+  // 2+ share an identifier (`venues.wikidata` has no unique constraint), the
+  // same detect-and-skip pattern as Tier 2 / Tier 3.
+  for (const order of [
+    [candidate({ id: "v-A", normalizedName: "a", wikidata: "Q1" }), candidate({ id: "v-B", normalizedName: "b", wikidata: "Q1" })],
+    [candidate({ id: "v-B", normalizedName: "b", wikidata: "Q1" }), candidate({ id: "v-A", normalizedName: "a", wikidata: "Q1" })],
+  ]) {
+    const r = resolveVenueIdentity(req({ incoming: incoming({ wikidata: "Q1", normalizedName: "zzz" }), existingInCity: order }));
+    assert.equal(r.decision, "ambiguous");
+    assert.equal(r.tier, null);
+    assert.equal(r.canonicalId, null);
+  }
 });
 
 // ── STEP 10 — null / empty / malformed inputs ─────────────────────────

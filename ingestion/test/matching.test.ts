@@ -5,6 +5,7 @@ import {
   resolveMatch,
   type MatchContext,
 } from "../src/matching.ts";
+import { VENUE_ALIASES } from "../src/aliases.ts";
 import type { ExistingVenue, NormalizedVenue } from "../src/types.ts";
 
 const BELGRADE = { countryId: "RS", cityName: "Belgrade", osmRelationId: 2728438 };
@@ -359,4 +360,230 @@ test("Tier 4: nothing matches -> plain new, no review flag", () => {
   const outcome = resolveMatch(incoming, ctx(SEEDED));
   assert.equal(outcome.kind, "new");
   if (outcome.kind === "new") assert.ok(!outcome.review);
+});
+
+// ════════════════════════════════════════════════════════════════════════
+//  AUDIT PASS — decision-flow contract (characterization + 1 KNOWN BUG)
+// ════════════════════════════════════════════════════════════════════════
+
+const plain = (over: Partial<NormalizedVenue> & { name: string; nameNormalized: string; externalId: string }) =>
+  incomingVenue({ latitude: 44.8, longitude: 20.4, ...over });
+
+// ── TIER PRECEDENCE — stronger evidence dominates, checked in order 0→4 ──
+test("[precedence] Tier 0 (source+external_id) beats a separate Tier 1 Wikidata candidate", () => {
+  const t0 = existingVenue({ id: "v-t0", name: "T0", name_normalized: "t0", source_id: "osm-src", external_id: "node/9" });
+  const t1 = existingVenue({ id: "v-t1", name: "T1", name_normalized: "t1", wikidata: "Q5" });
+  const r = resolveMatch(plain({ name: "X", nameNormalized: "x", externalId: "node/9", wikidata: "Q5" }), ctx([t1, t0]));
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 0); assert.equal(r.venue.id, "v-t0"); }
+});
+
+test("[precedence] Tier 1 Wikidata beats Tier 1 website (checked first)", () => {
+  const byQid = existingVenue({ id: "v-q", name: "Q", name_normalized: "q", wikidata: "Q5" });
+  const byWeb = existingVenue({ id: "v-w", name: "W", name_normalized: "w", website: "https://venue.rs" });
+  const r = resolveMatch(
+    plain({ name: "X", nameNormalized: "x", externalId: "node/1", wikidata: "Q5", website: "https://venue.rs" }),
+    ctx([byWeb, byQid]),
+  );
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 1); assert.equal(r.venue.id, "v-q"); }
+});
+
+test("[precedence] Tier 1 website beats a Tier 2 exact-name candidate", () => {
+  const byWeb = existingVenue({ id: "v-w", name: "W", name_normalized: "w", website: "https://venue.rs" });
+  const byName = existingVenue({ id: "v-n", name: "Same", name_normalized: "same" });
+  const r = resolveMatch(
+    plain({ name: "Same", nameNormalized: "same", externalId: "node/1", website: "https://www.venue.rs/x" }),
+    ctx([byName, byWeb]),
+  );
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 1); assert.equal(r.venue.id, "v-w"); }
+});
+
+test("[precedence] Tier 2 exact-name beats a Tier 3 curated alias", () => {
+  // an existing venue literally normalized to "dragstor" -> Tier 2, not the alias
+  const literal = existingVenue({ id: "v-lit", name: "Dragstor Bar", name_normalized: "dragstor" });
+  const r = resolveMatch(plain({ name: "Драгстор", nameNormalized: "dragstor", externalId: "node/1" }), ctx([...SEEDED, literal]));
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 2); assert.equal(r.venue.id, "v-lit"); }
+});
+
+// ── AMBIGUITY — Tier 2 & Tier 3 count candidates and refuse to guess ──
+test("[ambiguity] Tier 2: two exact-name candidates -> skip in EITHER candidate order", () => {
+  const a = existingVenue({ id: "t-a", name: "Twin", name_normalized: "twin" });
+  const b = existingVenue({ id: "t-b", name: "Twin", name_normalized: "twin" });
+  const i = plain({ name: "Twin", nameNormalized: "twin", externalId: "node/1" });
+  assert.equal(resolveMatch(i, ctx([a, b])).kind, "skip");
+  assert.equal(resolveMatch(i, ctx([b, a])).kind, "skip");
+});
+
+test("[ambiguity] Tier 3: two venues normalize to the alias canonical -> skip in EITHER order", () => {
+  const a = existingVenue({ id: "d-a", name: "Drugstore", name_normalized: "drugstore", latitude: 44.8185, longitude: 20.4883 });
+  const b = existingVenue({ id: "d-b", name: "Drugstore", name_normalized: "drugstore", latitude: 44.8186, longitude: 20.4884 });
+  const i = plain({ name: "Драгстор", nameNormalized: "dragstor", externalId: "node/1", latitude: 44.8185, longitude: 20.4883 });
+  assert.equal(resolveMatch(i, ctx([a, b])).kind, "skip");
+  assert.equal(resolveMatch(i, ctx([b, a])).kind, "skip");
+});
+
+// ── Tier 1 ambiguity — collect ALL free candidates and refuse to guess ──
+test("[ambiguity] Tier 1 website: 2+ existing venues on one dedicated domain -> skip (both candidate orders)", () => {
+  // A venue GROUP legitimately lists one top-level website on every hall, and
+  // `venues.website` has NO unique constraint. Tier 1b must not first-match.
+  const salaA = existingVenue({ id: "v-salaA", name: "Sala A", name_normalized: "sala a", website: "https://kcns.rs" });
+  const salaB = existingVenue({ id: "v-salaB", name: "Sala B", name_normalized: "sala b", website: "https://www.kcns.rs/" });
+  const incC = plain({ name: "Sala C", nameNormalized: "sala c", externalId: "node/NEW", website: "http://kcns.rs/program" });
+
+  for (const order of [[salaA, salaB], [salaB, salaA]] as const) {
+    const r = resolveMatch(incC, ctx([...order]));
+    assert.equal(r.kind, "skip");
+    if (r.kind === "skip") assert.match(r.note, /ambiguous: 2 existing venues share website domain kcns\.rs/);
+  }
+});
+
+test("[ambiguity] Tier 1 Wikidata: 2+ existing venues sharing a QID -> skip (both candidate orders)", () => {
+  // `venues.wikidata` also has no unique constraint.
+  const a = existingVenue({ id: "w-a", name: "A", name_normalized: "a", wikidata: "Q1" });
+  const b = existingVenue({ id: "w-b", name: "B", name_normalized: "b", wikidata: "Q1" });
+  const i = plain({ name: "Z", nameNormalized: "zzz", externalId: "node/1", wikidata: "Q1" });
+  for (const order of [[a, b], [b, a]] as const) {
+    const r = resolveMatch(i, ctx([...order]));
+    assert.equal(r.kind, "skip");
+    if (r.kind === "skip") assert.match(r.note, /ambiguous: 2 existing venues share wikidata Q1/);
+  }
+});
+
+test("[ambiguity] Tier 1: exactly ONE free candidate still matches at tier 1 (note format preserved)", () => {
+  const q = existingVenue({ id: "v-q", name: "Q", name_normalized: "q", wikidata: "Q7" });
+  const rQ = resolveMatch(plain({ name: "X", nameNormalized: "x", externalId: "n/1", wikidata: "Q7" }), ctx([q]));
+  assert.equal(rQ.kind, "match");
+  if (rQ.kind === "match") { assert.equal(rQ.tier, 1); assert.equal(rQ.note, "wikidata Q7"); }
+
+  const d = existingVenue({ id: "v-d", name: "D", name_normalized: "d", website: "https://drugstore.rs/" });
+  const rW = resolveMatch(plain({ name: "X", nameNormalized: "x", externalId: "n/2", website: "http://www.drugstore.rs/x" }), ctx([d]));
+  assert.equal(rW.kind, "match");
+  if (rW.kind === "match") { assert.equal(rW.tier, 1); assert.equal(rW.note, "website domain drugstore.rs"); }
+});
+
+test("[ambiguity] Tier 1: a consumed duplicate does not count toward ambiguity -> the one free candidate matches", () => {
+  const a = existingVenue({ id: "w-a", name: "A", name_normalized: "a", wikidata: "Q1" });
+  const b = existingVenue({ id: "w-b", name: "B", name_normalized: "b", wikidata: "Q1" });
+  const i = plain({ name: "Z", nameNormalized: "zzz", externalId: "n/1", wikidata: "Q1" });
+  const r = resolveMatch(i, ctx([a, b], ["w-a"])); // w-a already consumed this run
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 1); assert.equal(r.venue.id, "w-b"); }
+});
+
+test("[ambiguity] Tier 1: zero identity matches falls through to a Tier 2 exact-name match", () => {
+  const named = existingVenue({ id: "v-n", name: "Only Name", name_normalized: "only name" });
+  const r = resolveMatch(
+    plain({ name: "Only Name", nameNormalized: "only name", externalId: "n/1", wikidata: "Q999", website: "https://nowhere.rs" }),
+    ctx([named]),
+  );
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 2); assert.equal(r.venue.id, "v-n"); }
+});
+
+test("[safe] Tier 0 first-match IS safe — the DB `unique (source_id, external_id)` guarantees at most one candidate", () => {
+  const only = existingVenue({ id: "v-only", name: "Only", name_normalized: "only", source_id: "osm-src", external_id: "node/9" });
+  const other = existingVenue({ id: "v-other", name: "Other", name_normalized: "other", source_id: "osm-src", external_id: "node/DIFFERENT" });
+  const i = plain({ name: "Re", nameNormalized: "re", externalId: "node/9" });
+  assert.equal((resolveMatch(i, ctx([only, other])) as { venue: ExistingVenue }).venue.id, "v-only");
+  assert.equal((resolveMatch(i, ctx([other, only])) as { venue: ExistingVenue }).venue.id, "v-only");
+});
+
+// ── WEBSITE / DOMAIN — integration of the (already-fixed) aliases.ts helpers ──
+test("[website] the aliases.ts compound-suffix fix flows through Tier 1: two `.co.rs` registrants do NOT merge", () => {
+  const a = existingVenue({ id: "v-a", name: "Klub A", name_normalized: "klub a", website: "https://klub-a.co.rs" });
+  const i = plain({ name: "Klub C", nameNormalized: "klub c", externalId: "node/1", website: "https://klub-c.co.rs" });
+  assert.equal(resolveMatch(i, ctx([a])).kind, "new");
+
+  // …but the SAME `.co.rs` registrant (www / path) still matches at Tier 1
+  const same = plain({ name: "Klub A2", nameNormalized: "klub a2", externalId: "node/2", website: "https://www.klub-a.co.rs/events" });
+  const r = resolveMatch(same, ctx([a]));
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") assert.equal(r.tier, 1);
+});
+
+test("[website] null / different / malformed websites never match at Tier 1", () => {
+  const a = existingVenue({ id: "v-a", name: "A", name_normalized: "a", website: "https://one.rs" });
+  assert.equal(resolveMatch(plain({ name: "B", nameNormalized: "b", externalId: "n/1", website: null }), ctx([a])).kind, "new");
+  assert.equal(resolveMatch(plain({ name: "B", nameNormalized: "b", externalId: "n/1", website: "https://two.rs" }), ctx([a])).kind, "new");
+  assert.equal(resolveMatch(plain({ name: "B", nameNormalized: "b", externalId: "n/1", website: "not a url" }), ctx([a])).kind, "new");
+});
+
+// ── PROXIMITY GUARD (Tier 3) ─────────────────────────────────────────
+test("[proximity] Tier 3: incoming with NaN coordinates never gets a distance-based link", () => {
+  const r = resolveMatch(
+    { ...incomingVenue({ name: "Драгстор", nameNormalized: "dragstor", externalId: "node/1", latitude: 44.8, longitude: 20.4 }), latitude: Number.NaN, longitude: Number.NaN },
+    ctx(SEEDED),
+  );
+  assert.equal(r.kind, "new");
+  if (r.kind === "new") assert.equal(r.review, true);
+});
+
+test("[proximity] Tier 3: canonical venue has NO coordinates -> alias links unconditionally (matcher policy)", () => {
+  const noCoords = existingVenue({ id: "v-ds", name: "Drugstore", name_normalized: "drugstore" });
+  const r = resolveMatch(
+    incomingVenue({ name: "Драгстор", nameNormalized: "dragstor", externalId: "node/1", latitude: 44.8, longitude: 20.4 }),
+    ctx([noCoords]),
+  );
+  assert.equal(r.kind, "match");
+  if (r.kind === "match") { assert.equal(r.tier, 3); assert.match(r.note ?? "", /no coordinates to cross-check/); }
+});
+
+test("[proximity] coordinates alone never merge two venues (different name, no alias, ~5 m apart)", () => {
+  const near = existingVenue({ id: "v-near", name: "Alpha", name_normalized: "alpha", latitude: 44.80000, longitude: 20.40000 });
+  const r = resolveMatch(
+    incomingVenue({ name: "Beta", nameNormalized: "beta", externalId: "node/1", latitude: 44.80003, longitude: 20.40003 }),
+    ctx([near]),
+  );
+  assert.equal(r.kind, "new");
+});
+
+// ── IMMUTABILITY / DETERMINISM ───────────────────────────────────────
+test("[purity] resolveMatch mutates nothing: incoming, ctx.existing, ctx.consumed, VENUE_ALIASES", () => {
+  const existing = [
+    existingVenue({ id: "v-1", name: "Драгстор dup", name_normalized: "dragstor" }),
+    existingVenue({ id: "v-ds", name: "Drugstore", name_normalized: "drugstore", latitude: 44.8185, longitude: 20.4883 }),
+  ];
+  const incoming = incomingVenue({ name: "Драгстор", nameNormalized: "dragstor", externalId: "node/1", latitude: 44.8185, longitude: 20.4883 });
+  const consumed = new Set<string>();
+  const context: MatchContext = { target: BELGRADE, osmSourceId: "osm-src", existing, consumed };
+
+  const existingBefore = JSON.stringify(existing);
+  const incomingBefore = JSON.stringify(incoming);
+  const aliasesBefore = JSON.stringify(VENUE_ALIASES);
+
+  resolveMatch(incoming, context);
+
+  assert.equal(JSON.stringify(existing), existingBefore, "ctx.existing unchanged");
+  assert.equal(JSON.stringify(incoming), incomingBefore, "incoming unchanged");
+  assert.equal(context.consumed.size, 0, "resolveMatch never adds to ctx.consumed (the caller does)");
+  assert.equal(JSON.stringify(VENUE_ALIASES), aliasesBefore, "the curated alias table is untouched");
+});
+
+test("[determinism] identical input + identical candidate order -> identical outcome (repeat)", () => {
+  const i = incomingVenue({ name: "20/44", nameNormalized: "20 44", externalId: "node/1", latitude: 44.814, longitude: 20.451 });
+  const first = resolveMatch(i, ctx(SEEDED));
+  for (let k = 0; k < 5; k++) assert.deepEqual(resolveMatch(i, ctx(SEEDED)), first);
+});
+
+// ── consumed / free() ───────────────────────────────────────────────
+test("[consumed] a venue consumed earlier this run is invisible to Tier 1 and Tier 2", () => {
+  const v = existingVenue({ id: "v-x", name: "X", name_normalized: "x", wikidata: "Q9", website: "https://x.rs" });
+  const context = ctx([v], ["v-x"]); // already consumed
+  assert.equal(resolveMatch(plain({ name: "X2", nameNormalized: "x", externalId: "n/1", wikidata: "Q9" }), context).kind, "new");
+  assert.equal(resolveMatch(plain({ name: "X2", nameNormalized: "x", externalId: "n/1", website: "https://x.rs" }), context).kind, "new");
+});
+
+// ── reviewNotesForNewVenues is advisory only ─────────────────────────
+test("[advisory] reviewNotesForNewVenues never changes a decision and does not mutate its inputs", () => {
+  const newVenues = [
+    incomingVenue({ name: "Klub North", nameNormalized: "klub north", externalId: "node/a", latitude: 44.8000, longitude: 20.4000 }),
+  ];
+  const existing = [existingVenue({ id: "v-e", name: "Klub South", name_normalized: "klub south", latitude: 44.80005, longitude: 20.40005 })];
+  const before = JSON.stringify([newVenues, existing]);
+  const notes = reviewNotesForNewVenues(newVenues, existing);
+  assert.equal(JSON.stringify([newVenues, existing]), before);
+  assert.ok(notes instanceof Map);
 });

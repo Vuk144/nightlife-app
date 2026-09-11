@@ -91,11 +91,34 @@ export const PLATFORM_HOSTS = new Set<string>([
 ]);
 
 /**
+ * Second-level labels that are really public suffixes — the registrable domain
+ * is the last THREE hostname labels, not two. A hand-checked lookup table
+ * (like `PLATFORM_HOSTS`), curated for the current deployment geography
+ * (Serbia, Croatia); extend it as new countries are onboarded. Deliberately NOT
+ * a public-suffix-list dependency.
+ */
+const COMPOUND_SUFFIXES = new Set<string>([
+  "com.hr",
+  "com.rs",
+  "co.rs",
+  "org.rs",
+  "edu.rs",
+  "in.rs",
+]);
+
+/**
  * The apex (registrable) domain of a URL, lower-cased, or null if it can't be
- * parsed. Deliberately simple: the last two labels of the hostname
- * (foo.bar.example.com -> example.com). Multi-part public suffixes (co.uk) are
- * not special-cased; if that makes the result "wrong" it only ever makes the
- * Tier 1 domain check *more* conservative (it won't match), never less.
+ * parsed. Normally the last two labels of the hostname
+ * (`foo.bar.example.com` -> `example.com`).
+ *
+ * When those last two labels are a curated compound public suffix
+ * (`COMPOUND_SUFFIXES`, e.g. `com.hr`), the registrable domain is the last
+ * THREE labels instead (`tvornica.com.hr` -> `tvornica.com.hr`), so two
+ * unrelated venues on the same compound ccTLD are not treated as sharing a
+ * dedicated domain. A compound suffix NOT in the curated set (`co.uk`, …) still
+ * collapses to just the suffix, so two different registrants that share it
+ * (`pub-a.co.uk`, `pub-b.co.uk`) can still over-match at Tier 1 — add the
+ * suffix to `COMPOUND_SUFFIXES` when that country is onboarded.
  */
 export function apexDomain(url: string | null | undefined): string | null {
   if (!url) return null;
@@ -108,7 +131,11 @@ export function apexDomain(url: string | null | undefined): string | null {
   host = host.replace(/^www\./, "");
   const labels = host.split(".").filter(Boolean);
   if (labels.length < 2) return null;
-  return labels.slice(-2).join(".");
+  const lastTwo = labels.slice(-2).join(".");
+  if (labels.length >= 3 && COMPOUND_SUFFIXES.has(lastTwo)) {
+    return labels.slice(-3).join(".");
+  }
+  return lastTwo;
 }
 
 /**
