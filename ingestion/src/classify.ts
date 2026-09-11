@@ -279,8 +279,10 @@ export function classifyOsmElement(
   const leisure = lower(tags.leisure);
   const name = tags.name ?? "";
 
-  if (tags.shop) return { accepted: false, reason: `shop=${tags.shop}` };
-  if (tags.office) return { accepted: false, reason: `office=${tags.office}` };
+  // `shop=no` / `office=no` are OSM NEGATIONS ("explicitly not a shop/office"),
+  // not exclusions — `truthy()` filters the no/none/false/0 family.
+  if (truthy(tags.shop)) return { accepted: false, reason: `shop=${tags.shop}` };
+  if (truthy(tags.office)) return { accepted: false, reason: `office=${tags.office}` };
   if (amenity && EXCLUDED_AMENITIES.has(amenity)) {
     return { accepted: false, reason: `amenity=${amenity}` };
   }
