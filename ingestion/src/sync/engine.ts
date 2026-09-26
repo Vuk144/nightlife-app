@@ -90,6 +90,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   const reviewItems: ReviewItem[] = [];
   const seenKeys = new Set<string>();
   const linkedVenueCache = new Map<string, NormalizedRecord | null>();
+  const eventFirstCandidateKeys = new Set<string>();
 
   const primaryCountry =
     config.country(source.scope.countries[0] ?? null) ??
@@ -167,6 +168,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
         reviewItems,
         seenKeys,
         linkedVenueCache,
+        eventFirstCandidateKeys,
       });
     }
   }
@@ -222,6 +224,13 @@ interface ProcessCtx {
   reviewItems: ReviewItem[];
   seenKeys: Set<string>;
   linkedVenueCache: Map<string, NormalizedRecord | null>;
+  /**
+   * `sourceKey:externalId` of every event-first venue candidate already
+   * decided this run. Several events at the same unknown venue name ONE
+   * candidate — without this, each emitted its own insert (over-counting
+   * `venuesNew`) or its own identical review item.
+   */
+  eventFirstCandidateKeys: Set<string>;
 }
 
 async function processRecord(input: NormalizedRecord, ctx: ProcessCtx): Promise<void> {
@@ -374,7 +383,9 @@ async function processEvent(
     let address = hint.address;
     let website: string | null = null;
     let wikidata: string | null = null;
-    let venueExternalId = hint.sourceVenueId ?? `name:${normalize(hint.name)}`;
+    // `||`, not `??`: an empty-string id is as absent as a null one (the
+    // enrichment guard below already treats it that way).
+    let venueExternalId = hint.sourceVenueId || `name:${normalize(hint.name)}`;
 
     // best-effort enrichment from the source's own venue page
     if (hint.sourceVenueId && adapter.fetchLinked && adapter.capabilities.givesVenuePages) {
@@ -384,7 +395,7 @@ async function processEvent(
         ctx.linkedVenueCache.set(hint.sourceVenueId, linked ?? null);
       }
       if (linked && linked.kind === "venue") {
-        venueName = linked.fields.name || venueName;
+        venueName = linked.fields.name?.trim() ? linked.fields.name : venueName;
         coordinates = linked.fields.coordinates ?? coordinates;
         address = linked.fields.address ?? address;
         website = linked.fields.website;
@@ -408,10 +419,16 @@ async function processEvent(
       existingInCity: existing,
     });
 
+    const candidateKey = `${p.sourceKey}:${venueExternalId}`;
     if (venueIdentity.decision === "matched") {
       resolvedVenueId = venueIdentity.canonicalId;
       stats.venuesMatched++;
-    } else if (venueIdentity.decision === "new_candidate" && validation.outcome === "ok") {
+    } else if (
+      venueIdentity.decision === "new_candidate" &&
+      validation.outcome === "ok" &&
+      !ctx.eventFirstCandidateKeys.has(candidateKey)
+    ) {
+      ctx.eventFirstCandidateKeys.add(candidateKey);
       // emit an event-first venue candidate
       const venueRecord: Extract<NormalizedRecord, { kind: "venue" }> = {
         kind: "venue",
@@ -433,25 +450,45 @@ async function processEvent(
         },
         links: {},
       };
-      ctx.upserts.push({
-        kind: "venue",
-        operation: scope.eventFirstEnabled ? "insert" : "skip",
-        changeStatus: "NEW",
-        canonicalId: null,
-        fieldDeltas: [],
+      // The event's own validation only screens the hint for placeholders; the
+      // candidate (whose name may also come from the linked venue page) must
+      // pass the same venue rules as a venue-first record — e.g. never an
+      // empty `normalizedName` match key, never a 1-character name.
+      const candidateValidation = validateRecord({
         record: venueRecord,
-        identity: venueIdentity,
+        scope,
+        country: config.country(venueRecord.scope.countryCode),
       });
-      if (scope.eventFirstEnabled) stats.venuesNew++;
-      else {
+      if (candidateValidation.outcome !== "ok") {
         ctx.reviewItems.push({
           kind: "venue",
-          reasonCode: "city-not-event-first-enabled",
-          reasons: [`${scope.cityName} does not permit event-first venue creation`],
+          reasonCode: candidateValidation.reasonCode ?? "event-first-venue-invalid",
+          reasons: candidateValidation.reasons,
           record: venueRecord,
           suggestedCanonicalId: null,
         });
         stats.reviewItems++;
+      } else {
+        ctx.upserts.push({
+          kind: "venue",
+          operation: scope.eventFirstEnabled ? "insert" : "skip",
+          changeStatus: "NEW",
+          canonicalId: null,
+          fieldDeltas: [],
+          record: venueRecord,
+          identity: venueIdentity,
+        });
+        if (scope.eventFirstEnabled) stats.venuesNew++;
+        else {
+          ctx.reviewItems.push({
+            kind: "venue",
+            reasonCode: "city-not-event-first-enabled",
+            reasons: [`${scope.cityName} does not permit event-first venue creation`],
+            record: venueRecord,
+            suggestedCanonicalId: null,
+          });
+          stats.reviewItems++;
+        }
       }
     } else if (venueIdentity.decision === "ambiguous") {
       ctx.reviewItems.push({

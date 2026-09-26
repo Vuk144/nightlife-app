@@ -185,6 +185,77 @@ test("429 is retried, then the eventual 200 is returned", async (t) => {
   assert.equal(calls.length, 2);
 });
 
+// RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}. 429/500/502/503 are
+// already exercised above by other scenarios; these three close the only
+// members of the declared set with zero prior coverage, so a future typo or
+// accidental removal from the set is actually caught.
+test("408 (Request Timeout) is retried, matching the rest of RETRYABLE_STATUS", async (t) => {
+  const { calls } = installFetch(t, [{ status: 408 }, { status: 200, body: "ok" }]);
+  const { value } = await run(t, "https://x.test/x", { userAgent: UA, attempts: 2 });
+  assert.equal(value!.status, 200);
+  assert.equal(calls.length, 2);
+});
+
+test("425 (Too Early) is retried, matching the rest of RETRYABLE_STATUS", async (t) => {
+  const { calls } = installFetch(t, [{ status: 425 }, { status: 200, body: "ok" }]);
+  const { value } = await run(t, "https://x.test/x", { userAgent: UA, attempts: 2 });
+  assert.equal(value!.status, 200);
+  assert.equal(calls.length, 2);
+});
+
+test("504 (Gateway Timeout) is retried, matching the rest of RETRYABLE_STATUS", async (t) => {
+  const { calls } = installFetch(t, [{ status: 504 }, { status: 200, body: "ok" }]);
+  const { value } = await run(t, "https://x.test/x", { userAgent: UA, attempts: 2 });
+  assert.equal(value!.status, 200);
+  assert.equal(calls.length, 2);
+});
+
+// The other retry tests only prove the request "eventually" fires again —
+// `run()`'s generic 10s-tick loop would pass even if the backoff formula were
+// flat or wrong, as long as each delay stays under 10s. This pins the actual
+// documented formula (`3_000 * attempt`: 3000ms, then 6000ms — LINEAR, not
+// flat) with exact tick control, so a server is never hammered faster than
+// intended and a future edit that flattens/changes the formula is caught.
+test("backoff is linear and scales with attempt number: exactly 3000ms then 6000ms, not a flat delay", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const { calls } = installFetch(t, [
+      { status: 503 },
+      { status: 503 },
+      { status: 200, body: "ok" },
+    ]);
+    let done = false;
+    let value: Awaited<ReturnType<typeof httpGetText>> | undefined;
+    void httpGetText("https://x.test/x", { userAgent: UA, attempts: 3 }).then((v) => {
+      done = true;
+      value = v;
+    });
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls.length, 1, "first attempt fires immediately");
+
+    t.mock.timers.tick(2999);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls.length, 1, "the first backoff (3000ms) has not elapsed yet");
+
+    t.mock.timers.tick(1);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls.length, 2, "the second attempt fires at exactly 3000ms");
+
+    t.mock.timers.tick(5999);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls.length, 2, "the second backoff (6000ms) has not elapsed yet — must be LONGER than the first");
+
+    t.mock.timers.tick(1);
+    for (let n = 0; n < 10 && !done; n++) await new Promise((r) => setImmediate(r));
+    assert.equal(calls.length, 3, "the third attempt fires at exactly 6000ms after the second");
+    assert.ok(done);
+    assert.equal(value!.status, 200);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
+
 test("a persistent network failure runs every attempt and then throws with context", async (t) => {
   const { calls } = installFetch(t, [
     new Error("ECONNRESET"),

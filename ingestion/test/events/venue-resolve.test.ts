@@ -35,6 +35,52 @@ function readOnlySupabase(tables: Record<string, unknown[]>): SupabaseClient {
   } as unknown as SupabaseClient;
 }
 
+/**
+ * Like `readOnlySupabase`, but the query against `failingTable` resolves a
+ * PostgrestError-shaped `{ data: null, error }` instead of real rows — for
+ * exercising `createVenueResolver`'s "Could not read cities/venues: ..."
+ * throw branches. Every other table still resolves normally, so a failure on
+ * `venues` is only reachable once the `cities` read has already succeeded.
+ */
+function supabaseWithReadError(
+  tables: Record<string, unknown[]>,
+  failingTable: string,
+  errorMessage: string,
+): SupabaseClient {
+  const guard = (name: string) => () => {
+    throw new Error(`WRITE ATTEMPTED: ${name}`);
+  };
+  return {
+    rpc: guard("rpc"),
+    from(table: string) {
+      const builder: Record<string, unknown> = {
+        select: () => builder,
+        in: () => builder,
+        eq: () => builder,
+        then: (
+          resolve: (r: {
+            data: unknown[] | null;
+            error: { message: string; details: string; hint: string; code: string } | null;
+          }) => void,
+        ) =>
+          resolve(
+            table === failingTable
+              ? {
+                  data: null,
+                  error: { message: errorMessage, details: "", hint: "", code: "PGRST000" },
+                }
+              : { data: tables[table] ?? [], error: null },
+          ),
+        insert: guard("insert"),
+        update: guard("update"),
+        upsert: guard("upsert"),
+        delete: guard("delete"),
+      };
+      return builder;
+    },
+  } as unknown as SupabaseClient;
+}
+
 const BELGRADE = { id: "city-bg", name: "Belgrade", country_id: "RS" };
 const NOVI_SAD = { id: "city-ns", name: "Novi Sad", country_id: "RS" };
 
@@ -99,6 +145,33 @@ function opts(over: Partial<VenueResolverOptions> = {}): VenueResolverOptions {
   };
 }
 
+// ── Supabase read failures (createVenueResolver setup, before any event is
+// resolved — not gated by resolve()'s name/city checks) ──────────────────
+
+test("cities query fails -> createVenueResolver rejects with 'Could not read cities: ...'", async () => {
+  await assert.rejects(
+    async () => {
+      await createVenueResolver(
+        supabaseWithReadError({}, "cities", "connection refused"),
+        opts(),
+      );
+    },
+    { message: "Could not read cities: connection refused" },
+  );
+});
+
+test("venues query fails (cities query succeeds first) -> createVenueResolver rejects with 'Could not read venues: ...'", async () => {
+  await assert.rejects(
+    async () => {
+      await createVenueResolver(
+        supabaseWithReadError({ cities: [BELGRADE] }, "venues", "statement timeout"),
+        opts(),
+      );
+    },
+    { message: "Could not read venues: statement timeout" },
+  );
+});
+
 const SOURCE_VENUE: Record<string, SourceVenue> = {
   "barutana-bg": {
     externalId: "4710",
@@ -149,6 +222,23 @@ test("existing venue exact name match -> matched_existing (tier 2), no enrichmen
   assert.equal(res.matchTier, 2);
   assert.equal(res.matchedVenueId, "v-drugstore");
   assert.equal(fetched, 0, "a clean name match must not fetch the venue page");
+});
+
+// Regression guard: `coordinatesSource` on a `matched_existing` result is a
+// verbatim passthrough of the existing venue row's `coordinates_source`
+// column, which is `string | null` (not limited to `"source"`). DRUGSTORE's
+// row has `coordinates_source: "manual"` — this must survive unchanged. If
+// the field/cast in venue-resolve.ts ever regresses to the narrow
+// `"source" | null` type it had before, this value would be silently
+// dropped to `null` and this assertion would fail.
+test("matched_existing passes a non-\"source\" coordinates_source (e.g. \"manual\") through unchanged", async () => {
+  const r = await createVenueResolver(
+    readOnlySupabase({ cities: [BELGRADE], venues: [DRUGSTORE] }),
+    opts({ fetchSourceVenue: fetchStub }),
+  );
+  const res = await r.resolve(ev({ name: "Drugstore", sourceVenueId: "drugstore", city: "Beograd" }), "primary");
+  assert.equal(res.status, "matched_existing");
+  assert.equal(res.coordinatesSource, "manual");
 });
 
 // ---- 2. existing venue via alias + matcher ----------------------------
@@ -465,10 +555,8 @@ test("[char] full resolution shape — matched_existing (Tier 2, DB coordinates_
     address: null,
     latitude: 44.8185264,
     longitude: 20.488357,
-    coordinatesSource: "manual", // NOTE: field type is `"source" | null`; the
-    // matched-venue branch passes the existing row's `coordinates_source`
-    // through verbatim. Not consumed downstream (event-first ignores matched
-    // resolutions). Locked as-is.
+    coordinatesSource: "manual", // matched-venue branch passes the existing
+    // row's `coordinates_source` through verbatim (field is `string | null`).
     sourceVenueId: "drugstore",
     locationConfidence: "coordinates",
     matchedVenueId: "v-drugstore",
@@ -787,6 +875,36 @@ test("[char] matchCityText resolves a non-aliased city by de-accented, case-fold
 });
 
 // ── enrichment robustness + determinism ──────────────────────────────
+
+test("fetchSourceVenue resolving null (real adapter's 404 behavior) -> falls back to event venue fields, degraded confidence", async () => {
+  const r = await createVenueResolver(
+    readOnlySupabase({ cities: [BELGRADE], venues: [DRUGSTORE] }),
+    opts({
+      // Matches the real gigstix adapter: a 404 response resolves `null`,
+      // it never throws (see `[char] fetchSourceVenue throwing is swallowed`
+      // above for the separate, unrelated exception-swallowing path).
+      fetchSourceVenue: () => Promise.resolve(null),
+    }),
+  );
+  let res: Awaited<ReturnType<typeof r.resolve>>;
+  await assert.doesNotReject(async () => {
+    res = await r.resolve(
+      ev({
+        name: "Ghost Club",
+        sourceVenueId: "ghost-club-404",
+        city: "Beograd",
+        address: "Nekog Ulica 5",
+      }),
+      "primary",
+    );
+  });
+  // no venue page to enrich from -> falls back to the event's own address
+  assert.equal(res!.address, "Nekog Ulica 5");
+  assert.equal(res!.latitude, null);
+  assert.equal(res!.coordinatesSource, null);
+  assert.equal(res!.locationConfidence, "address");
+  assert.equal(res!.status, "safe_new_venue");
+});
 
 test("[char] fetchSourceVenue throwing is swallowed — resolution proceeds as if enrichment returned nothing", async () => {
   const r = await createVenueResolver(

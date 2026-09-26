@@ -5,6 +5,9 @@
 import type { DryRunItem, DryRunReport } from "./engine.ts";
 import type { EventFirstCandidate } from "./event-first.ts";
 
+/** Default preview size for the safe/needs-review candidate lists (non-verbose). */
+const DEFAULT_CANDIDATE_PREVIEW = 40;
+
 function pad(value: number, width = 6): string {
   return String(value).padStart(width);
 }
@@ -184,21 +187,21 @@ export function formatReport(
     if (safe.length > 0) {
       out.push("");
       out.push(`  ── SAFE to create later (${safe.length}) ──`);
-      for (const c of safe.slice(0, opts.verbose ? safe.length : 40)) {
+      for (const c of safe.slice(0, opts.verbose ? safe.length : DEFAULT_CANDIDATE_PREVIEW)) {
         out.push(candidateBlock(c));
       }
-      if (!opts.verbose && safe.length > 40) {
-        out.push(`  … ${safe.length - 40} more (pass --verbose)`);
+      if (!opts.verbose && safe.length > DEFAULT_CANDIDATE_PREVIEW) {
+        out.push(`  … ${safe.length - DEFAULT_CANDIDATE_PREVIEW} more (pass --verbose)`);
       }
     }
     if (review.length > 0) {
       out.push("");
       out.push(`  ── NEEDS REVIEW (${review.length}) ──`);
-      for (const c of review.slice(0, opts.verbose ? review.length : 40)) {
+      for (const c of review.slice(0, opts.verbose ? review.length : DEFAULT_CANDIDATE_PREVIEW)) {
         out.push(candidateBlock(c));
       }
-      if (!opts.verbose && review.length > 40) {
-        out.push(`  … ${review.length - 40} more (pass --verbose)`);
+      if (!opts.verbose && review.length > DEFAULT_CANDIDATE_PREVIEW) {
+        out.push(`  … ${review.length - DEFAULT_CANDIDATE_PREVIEW} more (pass --verbose)`);
       }
     }
   }
@@ -218,7 +221,23 @@ export function formatReport(
     list.push(item);
     buckets.set(item.identity.identityKey, list);
   }
-  const collisions = [...buckets.values()].filter((list) => list.length > 1);
+  // A real collision is two or more DISTINCT canonical events (different
+  // `sourceKey`) sharing one venue+date. The SAME event discovered twice
+  // (e.g. via two overlapping sitemap entries) lands in the same bucket too,
+  // but it is one already-deduped canonical event (see `plannedCanonicalInserts`
+  // above), not a cross-source ambiguity — so it must not be reported as one.
+  const distinctBySourceKey = (list: DryRunItem[]): DryRunItem[] => {
+    const seen = new Set<string>();
+    return list.filter((item) => {
+      const key = item.identity!.sourceKey;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const collisions = [...buckets.values()]
+    .map(distinctBySourceKey)
+    .filter((list) => list.length > 1);
   if (collisions.length > 0) {
     out.push("");
     // The bucket key is `identity.venueKey` (`venue:<id>` / `name:<norm>` /

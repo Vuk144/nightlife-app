@@ -29,11 +29,14 @@ import {
   stripNoise,
 } from "./gigstix-html.ts";
 
+// Deliberately no bare "404": GIGS TIX's real 404 page title is always one of
+// the Serbian phrases below (see gigstix-event-notfound.html), and a plain
+// "404" substring check would misfire on a real event title that happens to
+// contain that number (e.g. a venue/room named "Sala 404").
 const NOT_FOUND_MARKERS = [
   "stranica nije pronađena",
   "stranica nije pronadjena",
   "page not found",
-  "404",
 ];
 
 /**
@@ -59,6 +62,7 @@ const GT = {
   /** `<li class="gt-…">` values that identify one detail row. */
   row: {
     startDate: "gt-start-date",
+    endDate: "gt-end-date",
     venue: "gt-venue",
     city: "gt-locations",
   },
@@ -101,8 +105,13 @@ function extractDetailRows(html: string): DetailRow[] {
 
   const rows: DetailRow[] = [];
   // any `<li class="gt-…">` inside the box — the specific row is matched by
-  // `findRow` against GT.row / GT.label
+  // `findRow` against GT.row / GT.label. Collected up front so each row's
+  // search window can be bounded by the START OF THE NEXT ROW rather than a
+  // fixed length: a row whose OWN label/inner div is missing or unusually
+  // long must never let the label/inner search spill into a NEIGHBOURING
+  // row's markup and silently steal its content.
   const liRe = /<li[^>]*class=["'](gt-[^"']*)["'][^>]*>/gi;
+  const starts = [...scope.matchAll(liRe)];
   const labelRe = new RegExp(
     `<div[^>]*class=["'][^"']*${GT.cls.rowLabel}[^"']*["'][^>]*>([\\s\\S]*?)</div>`,
     "i",
@@ -111,15 +120,15 @@ function extractDetailRows(html: string): DetailRow[] {
     `<div[^>]*class=["'][^"']*${GT.cls.rowInner}[^"']*["'][^>]*>([\\s\\S]*?)</div>`,
     "i",
   );
-  let m: RegExpExecArray | null;
-  while ((m = liRe.exec(scope)) !== null) {
-    const from = m.index;
-    const window = scope.slice(from, from + 1600);
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i].index;
+    const to = i + 1 < starts.length ? starts[i + 1].index : scope.length;
+    const window = scope.slice(from, to);
     const label = firstMatch(labelRe, window);
     const innerHtml = firstMatch(innerRe, window);
     if (label == null && innerHtml == null) continue;
     rows.push({
-      liClass: m[1],
+      liClass: starts[i][1],
       label: collapseWs(inlineText(label ?? "")),
       innerHtml: innerHtml ?? "",
       innerText: collapseWs(inlineText(innerHtml ?? "")),
@@ -228,7 +237,9 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
     return { ok: false, reason: "unparseable-date", detail: dateText || "(no date row)" };
   }
 
-  const endRow = findRow(rows, { labelStartsWith: GT.label.endDate });
+  const endRow =
+    findRow(rows, { liClass: GT.row.endDate }) ??
+    findRow(rows, { labelStartsWith: GT.label.endDate });
   const parsedEnd = endRow ? parseSerbianDateTime(endRow.innerText) : null;
 
   const venueRow =
@@ -301,10 +312,15 @@ export function parseGigstixEvent(html: string, url: string): ParseResult {
   const description = extractDescription(clean) ?? ogDescription;
 
   // ---- lifecycle status (explicit signal only; omission is NEVER cancellation) --
-  // Scan the human-readable text only; the combined postponed/cancelled category
-  // slug (GT.postponedCategory) resolves to "postponed" on its own and must NOT
-  // reach the cancellation keyword regex.
-  const marker = detectStatusMarker(`${title}\n${description ?? ""}`);
+  // Scan the TITLE only — where GIGS TIX actually places an explicit "–
+  // OTKAZANO"/"– ODLOŽENO" marker (see the parser tests). The free-text
+  // description is NOT scanned: it is the organizer's own prose and can
+  // reference an unrelated event's cancellation/postponement (e.g. "the
+  // Niš date was cancelled, but this one in Belgrade is confirmed") — that
+  // must never flip THIS event's status. The combined postponed/cancelled
+  // category slug (GT.postponedCategory) resolves to "postponed" on its own
+  // and must NOT reach the cancellation keyword regex.
+  const marker = detectStatusMarker(title);
   const status: NormalizedEvent["status"] =
     marker.status ??
     (categories.includes(GT.postponedCategory) ? "postponed" : undefined);

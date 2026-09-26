@@ -6,6 +6,11 @@
  * documented precondition / a deferred perf concern; each is pinned here as
  * `[Hn characterization]` with the contract stated in the test.
  *
+ * H11 (re-audit after event-first candidates gained venue validation) found
+ * three more: duplicate per-event candidates, an empty-string sourceVenueId
+ * becoming an empty external id, and a blank linked-page name overriding the
+ * hint name.
+ *
  * `planSync` is otherwise exercised end-to-end by `./zagreb.test.ts`,
  * `./contract.test.ts`, `./canonical-round-trip.test.ts` and the store-parity
  * suites; this file targets the specific behaviors the audit questioned.
@@ -367,4 +372,73 @@ test("[H10 characterization] limit: 0 / undefined / negative → no cap; limit: 
   assert.equal(await run(-1), 5, "a negative limit behaves like 0 (no cap) — undefined input, not a bug");
   assert.equal(await run(2), 2);
   assert.equal(await run(99), 5);
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  H11 — event-first venue candidates (reopened after the validation audit)
+// ════════════════════════════════════════════════════════════════════
+
+const hrEvent = (externalId: string, cityText: string, venueName: string, sourceVenueId: string | null = null) =>
+  fakeItem(eventRecord({
+    sourceKey: "entrio-hr", externalId, countryCode: "HR", cityText,
+    title: `Night ${externalId}`, startLocal: "2026-08-01T22:00", venueName, sourceVenueId,
+  }));
+
+test("[H11 regression] several events at the SAME unknown venue yield ONE candidate, not one insert per event", async () => {
+  const adapter = createInMemoryAdapter({
+    key: "entrio-hr",
+    items: [hrEvent("E1", "Zagreb", "Novi Klub"), hrEvent("E2", "Zagreb", "Novi Klub"), hrEvent("E3", "Zagreb", "★★"), hrEvent("E4", "Zagreb", "★★")],
+  });
+  const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+
+  const venueUpserts = plan.upserts.filter((u) => u.kind === "venue");
+  assert.equal(venueUpserts.length, 1, "was 2 — one insert per event for the same venue");
+  assert.equal(plan.stats.venuesNew, 1, "was 2 while apply() created only 1 venue");
+  // the invalid venue is reviewed once, not once per event
+  assert.deepEqual(plan.reviewItems.map((r) => r.reasonCode), ["empty-normalized-name"]);
+  assert.equal(plan.stats.reviewItems, plan.reviewItems.length);
+  // every event is still planned
+  assert.equal(plan.upserts.filter((u) => u.kind === "event").length, 4);
+});
+
+test("[H11] a city WITHOUT event-first: a valid candidate is a `skip` upsert + ONE city-not-event-first-enabled review; an invalid one is ONLY its validation review", async () => {
+  const adapter = createInMemoryAdapter({
+    key: "entrio-hr",
+    items: [hrEvent("E1", "Split", "Novi Klub"), hrEvent("E2", "Split", "X")],
+  });
+  const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+
+  const venueUpserts = plan.upserts.filter((u) => u.kind === "venue");
+  assert.deepEqual(venueUpserts.map((u) => u.operation), ["skip"]);
+  assert.equal(plan.stats.venuesNew, 0);
+  assert.deepEqual(plan.reviewItems.map((r) => r.reasonCode), ["city-not-event-first-enabled", "name-too-short"]);
+  assert.equal(plan.stats.reviewItems, 2);
+});
+
+test("[H11 regression] an empty-string sourceVenueId falls back to the name key instead of an empty external id", async () => {
+  const adapter = createInMemoryAdapter({ key: "entrio-hr", items: [hrEvent("E1", "Zagreb", "Novi Klub", "")] });
+  const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+  const venue = plan.upserts.find((u) => u.kind === "venue");
+  assert.equal(venue?.operation, "insert", `was a missing-external-id review: ${JSON.stringify(plan.reviewItems.map((r) => r.reasonCode))}`);
+  assert.equal(venue?.record.provenance.externalId, "name:novi klub");
+});
+
+test("[H11] the linked venue page's data is what gets validated; a blank linked name falls back to the hint name", async () => {
+  const page = (id: string, name: string, coordinates: { latitude: number; longitude: number } | null = null) =>
+    venuePage(id, venueRecord({ sourceKey: "entrio-hr", externalId: id, countryCode: "HR", cityText: "Zagreb", name, coordinates }));
+  const adapter = createInMemoryAdapter({
+    key: "entrio-hr",
+    items: [
+      hrEvent("E1", "Zagreb", "Good Hint", "p-short"), // linked name "Q" is too short
+      hrEvent("E2", "Zagreb", "Blank Page Club", "p-blank"), // linked name "   " must not override the hint
+      hrEvent("E3", "Zagreb", "Far Club", "p-far"), // linked coords outside HR bounds
+    ],
+    venuePages: [page("p-short", "Q"), page("p-blank", "   "), page("p-far", "Far Club", { latitude: 48.85, longitude: 2.35 })],
+  });
+  const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+
+  assert.deepEqual(plan.reviewItems.map((r) => r.reasonCode), ["name-too-short", "coordinates-out-of-region"]);
+  const inserted = plan.upserts.filter((u) => u.kind === "venue");
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0].record.kind === "venue" && inserted[0].record.fields.name, "Blank Page Club");
 });

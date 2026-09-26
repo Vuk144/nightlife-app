@@ -13,6 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { validateRecord } from "../../src/sync/validation.ts";
+import { latinProfile, serbianProfile } from "../../src/sync/normalization.ts";
 import {
   assertValidPlaceholderPatterns,
   InMemoryConfigProvider,
@@ -393,6 +394,30 @@ test("city-unresolved is still needs_review, and comes AFTER coordinate checks",
   assert.equal(r.reasonCode, "city-unresolved");
 });
 
+test("[BUG regression] a city that RESOLVED but is DISABLED in config is held for review, not silently admitted", () => {
+  // `resolveCity` (config.ts) has no `enabled` filter — it matches on name/alias
+  // alone — and `citiesInScope`'s enabled-only filtering only shapes what an
+  // adapter is TOLD to discover (`AdapterContext.cities`), which the type
+  // itself documents as "for adapters that can target" (i.e. best-effort, not
+  // enforced). A record whose scope resolves to a disabled city must not
+  // silently become a live upsert.
+  const disabled = v({}, { cityName: "Novi Sad", cityEnabled: false });
+  assert.equal(disabled.outcome, "needs_review");
+  assert.equal(disabled.reasonCode, "city-disabled");
+
+  // sanity: an ENABLED resolved city is unaffected
+  assert.equal(v({}, { cityName: "Belgrade", cityEnabled: true }).outcome, "ok");
+
+  // the event path gets the same check
+  const eventDisabled = validateRecord({
+    record: eventRecord(),
+    scope: scope({ cityName: "Novi Sad", cityEnabled: false }),
+    country: country(),
+  });
+  assert.equal(eventDisabled.outcome, "needs_review");
+  assert.equal(eventDisabled.reasonCode, "city-disabled");
+});
+
 // ════════════════════════════════════════════════════════════════════════
 //  AUDIT PASS — characterization of the current contract (no bug found)
 // ════════════════════════════════════════════════════════════════════════
@@ -514,6 +539,31 @@ test("[bounds] no bounds anywhere -> the regional check is a no-op (never a sile
   );
 });
 
+test("[bounds] a coordinate exactly ON a regional bound edge is IN region (inclusive), one step outside is not", () => {
+  const edges: GeoPoint[] = [
+    { latitude: RS_BOUNDS.minLat, longitude: 20 },
+    { latitude: RS_BOUNDS.maxLat, longitude: 20 },
+    { latitude: 44, longitude: RS_BOUNDS.minLon },
+    { latitude: 44, longitude: RS_BOUNDS.maxLon },
+  ];
+  for (const c of edges) {
+    const r = validateRecord({
+      record: venueRecord({ coordinates: c }),
+      scope: scope({ bounds: RS_BOUNDS }),
+      country: country({ bounds: RS_BOUNDS }),
+    });
+    assert.equal(r.outcome, "ok", `boundary point should be in-region: ${JSON.stringify(c)}`);
+  }
+
+  const justOutside: GeoPoint = { latitude: RS_BOUNDS.minLat - 0.001, longitude: 20 };
+  const r = validateRecord({
+    record: venueRecord({ coordinates: justOutside }),
+    scope: scope({ bounds: RS_BOUNDS }),
+    country: country({ bounds: RS_BOUNDS }),
+  });
+  assert.equal(r.reasonCode, "coordinates-out-of-region");
+});
+
 // ── placeholder detection: universal list + country extras, applied post-trim ──
 test("[placeholder] the universal list matches after trimming and is case-insensitive", () => {
   for (const name of ["  TBA  ", "n/a", "NONE", "Various Locations", "Online Event", "  ---  "]) {
@@ -526,7 +576,8 @@ test("[placeholder][ordering] a punctuation-only VENUE name is caught by empty-n
   // venue: the normalizedName check fires before isPlaceholder
   assert.equal(v({ name: "---", normalizedName: "" }).reasonCode, "empty-normalized-name");
 
-  // event venue hint: a hint has no normalizedName, so pattern /^[\s\-.?_]+$/ applies
+  // event venue hint: a hint has no normalizedName, so the UNIVERSAL
+  // punctuation-only pattern (isPlaceholder) is what catches it
   const base = eventRecord() as Extract<NormalizedRecord, { kind: "event" }>;
   const hintDashes: NormalizedRecord = {
     ...base,
@@ -536,6 +587,131 @@ test("[placeholder][ordering] a punctuation-only VENUE name is caught by empty-n
     validateRecord({ record: hintDashes, scope: scope(), country: country() }).reasonCode,
     "placeholder-venue-name",
   );
+});
+
+test("[BUG regression] a symbol-only name is rejected even for a profile whose normalizeName never returns '' (sr)", () => {
+  // `serbianProfile.normalizeName` (../name.ts#computeNameNormalized) falls
+  // back to a non-empty last-resort key for punctuation-only input, so
+  // `empty-normalized-name` can never fire for it (see normalization.test.ts).
+  // Before this fix, a real Serbian-profile venue named e.g. "!!!" sailed
+  // through validateRecord entirely: the universal placeholder catch-all only
+  // matched `[\s\-.?_]+`, which does not include "!". The catch-all must be
+  // locale-agnostic ("no letter or digit anywhere"), not tied to a fixed
+  // character set, so it still catches what `empty-normalized-name` misses.
+  for (const name of ["!!!", "@@@", "###", "***", "()()", "%%%"]) {
+    const normalizedName = serbianProfile.normalizeName(name);
+    assert.notEqual(normalizedName, "", `sr profile must never return '' (${name})`);
+    const r = validateRecord({
+      record: venueRecord({ name, normalizedName }),
+      scope: scope(),
+      country: country(), // normalizationProfile: "sr" by default
+    });
+    assert.equal(r.outcome, "rejected", `${JSON.stringify(name)} -> ${JSON.stringify(r)}`);
+    assert.equal(r.reasonCode, "placeholder-venue-name", JSON.stringify(name));
+  }
+
+  // latin profile: already caught upstream via empty-normalized-name — confirm
+  // the new pattern doesn't change that, and doesn't reject a real name.
+  assert.equal(latinProfile.normalizeName("!!!"), "");
+  assert.equal(
+    validateRecord({
+      record: venueRecord({ name: "!!!", normalizedName: latinProfile.normalizeName("!!!") }),
+      scope: scope(),
+      country: country({ normalizationProfile: "latin" }),
+    }).reasonCode,
+    "empty-normalized-name",
+  );
+  assert.equal(v({ name: "Klub Depo", normalizedName: "klub depo" }).outcome, "ok");
+});
+
+test("[BUG regression 2] non-ASCII punctuation-only names (em/en dash, ellipsis, curly quotes) are also caught", () => {
+  // The first fix (ASCII-only) still missed common non-ASCII placeholder
+  // punctuation. Unlike ASCII symbols, these can appear ANYWHERE the raw name
+  // reaches `isPlaceholder` with nothing else backing it up — that includes
+  // the EVENT venue-hint path for every country/profile, since `VenueLinkHint`
+  // has no `normalizedName` field to fall back on at all.
+  for (const name of ["———", "……", "‘’", "“”", "«»"]) {
+    // venue path, sr profile (its normalizeName never returns "")
+    const normalizedName = serbianProfile.normalizeName(name);
+    assert.notEqual(normalizedName, "", `sr profile must never return '' (${JSON.stringify(name)})`);
+    const venueResult = validateRecord({
+      record: venueRecord({ name, normalizedName }),
+      scope: scope(),
+      country: country(),
+    });
+    assert.equal(venueResult.reasonCode, "placeholder-venue-name", `venue ${JSON.stringify(name)}`);
+
+    // event path: no per-profile normalizedName exists on a venue hint at all
+    const base = eventRecord() as Extract<NormalizedRecord, { kind: "event" }>;
+    const hint: NormalizedRecord = {
+      ...base,
+      links: { venue: { name, sourceVenueId: null, address: null, coordinates: null, cityText: "Beograd" } },
+    };
+    const eventResult = validateRecord({ record: hint, scope: scope(), country: country() });
+    assert.equal(eventResult.reasonCode, "placeholder-venue-name", `event hint ${JSON.stringify(name)}`);
+  }
+});
+
+test("[BUG regression 3] invisible / non-content-only names (zero-width, soft hyphen, lone marks, controls) are rejected on both paths", () => {
+  // `String#trim` keeps \p{Cf}, and the sr fallback keeps it too, so before
+  // this fix every one of these was `ok` for an sr venue and for ANY event
+  // venue hint — an invisible canonical venue name.
+  const invisible = [
+    "​​", // zero-width space
+    "‌‍", // ZWNJ + ZWJ
+    "­­", // soft hyphen (&shy;)
+    "⁠⁠", // word joiner
+    "́́", // combining acute with no base letter
+    "️️", // emoji variation selectors with no emoji
+    "\u0000\u0007", // control chars
+    "--​", // punctuation + an invisible char
+  ];
+  for (const name of invisible) {
+    const normalizedName = serbianProfile.normalizeName(name);
+    assert.notEqual(normalizedName, "", `sr must not already catch ${JSON.stringify(name)}`);
+    const venueResult = validateRecord({ record: venueRecord({ name, normalizedName }), scope: scope(), country: country() });
+    assert.equal(venueResult.reasonCode, "placeholder-venue-name", `venue ${JSON.stringify(name)}`);
+
+    const base = eventRecord() as Extract<NormalizedRecord, { kind: "event" }>;
+    const hint: NormalizedRecord = {
+      ...base,
+      links: { venue: { name, sourceVenueId: null, address: null, coordinates: null, cityText: "Beograd" } },
+    };
+    const eventResult = validateRecord({ record: hint, scope: scope(), country: country() });
+    assert.equal(eventResult.reasonCode, "placeholder-venue-name", `event hint ${JSON.stringify(name)}`);
+  }
+});
+
+test("[BUG regression 3] an invisible char cannot smuggle a listed placeholder past the anchored patterns", () => {
+  const rs = country({ extraPlaceholderPatterns: ["^uskoro$"] });
+  for (const name of ["​TBA", "TBA​", "Live­stream", "﻿N/A", "Usk‍oro"]) {
+    const r = validateRecord({ record: venueRecord({ name, normalizedName: "x" }), scope: scope(), country: rs });
+    assert.equal(r.reasonCode, "placeholder-venue-name", JSON.stringify(name));
+  }
+});
+
+test("[placeholder] real names containing combining marks or invisible chars alongside letters are never rejected", () => {
+  for (const name of ["Café Bar", "Klub­Night", "Dom​omladine", "Sala ́X", "👨‍👩‍👧 Family Club"]) {
+    const r = v({ name, normalizedName: serbianProfile.normalizeName(name) });
+    assert.equal(r.outcome, "ok", `${JSON.stringify(name)} -> ${JSON.stringify(r)}`);
+  }
+});
+
+test("[placeholder] a symbol/emoji character used as real content (not filler) is never rejected", () => {
+  // `\p{S}` (Unicode Symbol) is deliberately excluded from the placeholder
+  // pattern — only `\p{P}` (punctuation). A standalone star/copyright/emoji is
+  // plausible real branding, not scraper filler.
+  for (const name of ["★★★", "©2026", "® Club", "🎵🎵", "★️★️", "👨‍👩"]) {
+    const r = v({ name, normalizedName: name.toLowerCase() });
+    assert.notEqual(r.reasonCode, "placeholder-venue-name", JSON.stringify(name));
+  }
+});
+
+test("[placeholder] a real name mixing punctuation/symbols with letters or digits is never rejected", () => {
+  for (const name of ["R&B Lounge", "AC/DC Tribute", "O'Brien's", "20/44", "Klub „Underground“", "Rock — Pop – Jazz"]) {
+    const r = v({ name, normalizedName: latinProfile.normalizeName(name) });
+    assert.notEqual(r.outcome, "rejected", `${JSON.stringify(name)} -> ${JSON.stringify(r)}`);
+  }
 });
 
 test("[placeholder] a country extra pattern only rejects; matching names are never merely needs_review", () => {

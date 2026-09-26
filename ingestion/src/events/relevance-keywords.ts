@@ -8,6 +8,16 @@
  *
  * The lists mix Serbian (de-accented, as `tokenize` produces) and English
  * tokens. Editing them is a deliberate curation step, not a code change.
+ *
+ * How an entry actually matches (`./text.ts#tokenize` + exact `Set.has`):
+ *   - WHOLE TOKENS only, never substrings: "koncert" does not match
+ *     "koncerta" — Serbian case forms must be listed explicitly.
+ *   - Hyphens and spaces split: "open-air" / "open air" are the two tokens
+ *     "open" + "air"; "openair" is one. A phrase can only be matched through
+ *     one of its words, which is why some short, generic-looking words
+ *     ("open", "stand") are here — removing them drops the phrase.
+ *   - De-accenting creates homographs: "štand" (a stall) becomes "stand".
+ *   - Non-Latin script produces no tokens at all (Cyrillic text never matches).
  */
 
 /**
@@ -86,17 +96,34 @@ export const HARD_NEGATIVE = new Set<string>([
 export const MUSIC_STRONG = new Set<string>([
   "koncert",
   "koncerti",
+  // Case forms of the core music nouns (matching is whole-token): "početak
+  // koncerta", "povratak benda", "promocija albuma". Nouns only — adjectives
+  // like "koncertna" name venues ("Koncertna dvorana"), which are never a
+  // relevance signal.
+  "koncerta",
+  "koncertu",
+  "koncertom",
+  "koncertima",
   "concert",
   "nastup",
+  "nastupa",
+  "nastupom",
   "svirka",
   "svirke",
+  "svirku",
   "live",
   "uzivo",
   "tribute",
   "tributes",
   "orkestar",
+  "orkestra",
+  "orkestrom",
   "orchestra",
   "bend",
+  "benda",
+  "bendom",
+  "bendovi",
+  "bendova",
   "band",
   "dj",
   "djs",
@@ -114,14 +141,44 @@ export const MUSIC_STRONG = new Set<string>([
   "warmup",
   "afterparty",
   "album",
+  "albuma",
   "singl",
   "spot",
   "turneja",
+  "turneje",
+  "turneju",
   "tour",
   "unplugged",
   "acoustic",
   "akusticni",
+  "akusticno",
+  "akusticna",
   "jam",
+  // Generic "music" and unambiguous genre names. Without them a titled
+  // "Wine & Jazz Festival" / "Street Music Festival" had no music evidence and
+  // lost to the non-music festival veto. Deliberately NOT: "rok" (deadline),
+  // "metal" (the material), "pop"/"soul" (pop-up, soul food).
+  "music",
+  "muzika",
+  "muzike",
+  "muziku",
+  "muzikom",
+  "muzicki",
+  "jazz",
+  "dzez",
+  "blues",
+  "bluz",
+  "rock",
+  "punk",
+  "reggae",
+  "hiphop",
+  // "hop": the usual "hip hop" / "hip-hop" spelling splits into two tokens and
+  // "hiphop" alone would miss it ("hip" is the ambiguous half). Known cost:
+  // the "hop on hop off" tourist bus also matches (as "tour" already does).
+  "hop",
+  "rap",
+  "disco",
+  "funk",
 ]);
 
 /**
@@ -137,8 +194,15 @@ export const NIGHTLIFE_SECONDARY = new Set<string>([
   "festival",
   "openair",
   "open",
-  "air",
+  // NOT "air" alone: tokenize splits "open air"/"open-air" into the two
+  // tokens "open" and "air", but "open" already matches that phrasing on its
+  // own — so a standalone "air" entry never adds a genuine "open air" match
+  // that "open" (or the compound "openair") wouldn't already catch, while it
+  // DOES independently false-positive on unrelated uses of the word "air"
+  // ("Air Serbia", "hot air balloon", "on air", "air conditioning", ...).
   "standup",
+  // "stand": the only way to catch "stand-up" / "stand up" (split into two
+  // tokens). Known cost: de-accented "štand" (a stall) also matches.
   "stand",
   "komedija",
   "kabare",
@@ -150,7 +214,24 @@ export const NIGHTLIFE_SECONDARY = new Set<string>([
   "night",
 ]);
 
-/** Non-music festival markers — a `festival` that is really something else. */
+/**
+ * The `NIGHTLIFE_SECONDARY` entries that say only "festival". On the free-text
+ * path they are as weak as a `festival` category, so `NON_MUSIC_FESTIVAL`
+ * vetoes them the same way (see `relevance.ts`).
+ */
+export const FESTIVAL_TOKENS = new Set<string>(["fest", "festival"]);
+
+/**
+ * The `NIGHTLIFE_SECONDARY` entries that only say "night". A New Year event is
+ * a night event by definition ("novogodišnja noć"), so for the `docek`
+ * category these are not party evidence (see `relevance.ts`).
+ */
+export const NIGHT_TOKENS = new Set<string>(["nocna", "noc", "night"]);
+
+/**
+ * Non-music festival markers — a festival that is really something else.
+ * Applied to the `festival` category AND to free-text festival evidence.
+ */
 export const NON_MUSIC_FESTIVAL = new Set<string>([
   "vina",
   "vinski",
@@ -163,12 +244,20 @@ export const NON_MUSIC_FESTIVAL = new Set<string>([
   "gastro",
   "street",
   "knjiga",
+  "knjige",
   "knjizevni",
   "book",
   "film",
   "filmski",
+  // genitive forms — the usual Serbian naming: "Festival filma", "Festival
+  // nauke", "Festival knjige", "Festival pozorišta"
+  "filma",
+  "filmova",
   "pozorisni",
+  "pozorista",
+  "teatarski",
   "naucni",
+  "nauke",
   "science",
   "cveca",
   "turisticki",

@@ -102,6 +102,22 @@ test("gigstix parse: category slugs captured for the relevance filter", () => {
     parseOk("gigstix-event-standup.html", STANDUP_URL).reported.categories,
     ["stand-up"],
   );
+  // intercell carries TWO eventcat-* classes on the same element
+  // ("eventcat-drugstore-karmakoma-beograd eventcat-koncert") — the only
+  // fixture that exercises splitting adjacent classes apart correctly.
+  assert.deepEqual(
+    parseOk("gigstix-event-intercell.html", INTERCELL_URL).reported.categories,
+    ["drugstore-karmakoma-beograd", "koncert"],
+  );
+});
+
+test("gigstix parse: no online ticket button -> ticketUrl/ticketingId are undefined, not guessed", () => {
+  // supercar is the only fixture with just the box-office button, no
+  // "Kupi ulaznice onlajn" link — proves the ticket regex doesn't fall back
+  // to some other link on the page when the expected one is absent.
+  const e = parseOk("gigstix-event-supercar.html", SUPERCAR_URL);
+  assert.equal(e.ticketUrl, undefined);
+  assert.equal(e.reported.ticketingId, null);
 });
 
 test("gigstix parse: cover image from og:image; lineup is never guessed", () => {
@@ -224,4 +240,69 @@ test("gigstix parse: missing detail box -> ParseFailure", () => {
   );
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, "missing-details");
+});
+
+// ---- REGRESSIONS -------------------------------------------------------
+
+test("[regression] a row missing its own gt-inner div never steals the NEXT row's content", () => {
+  // Previously, extractDetailRows searched each row's label/inner within a
+  // fixed 1600-char window from the row's own start, unbounded by that row's
+  // actual end. A row missing its own gt-inner (a plausible real-world
+  // markup glitch) would silently pick up the FOLLOWING row's gt-inner
+  // instead — e.g. the venue row stealing the categories row's link text.
+  const original =
+    '<li class="gt-venue"><div class="gt-icon"><svg></svg></div><div class="gt-content"><div class="gt-title">Lokacija</div><div class="gt-inner"><ul><li><a href="https://new.gigstix.com/venue/hangar-luka-beograd/">Hangar</a></li></ul></div></div></li>';
+  const replacement =
+    '<li class="gt-venue"><div class="gt-icon"><svg></svg></div><div class="gt-content"><div class="gt-title">Lokacija</div></div></li>';
+  const base = read("gigstix-event-kamelot.html");
+  assert.ok(base.includes(original), "fixture shape assumed by this test has not changed");
+
+  const result = parseGigstixEvent(base.replace(original, replacement), KAMELOT_URL);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    // must NOT be "Koncert" (the categories row's link text, one row over)
+    assert.equal(result.event.venue.name, "");
+    assert.equal(result.event.reported.venueNamedInSource, false);
+  }
+});
+
+test("[regression] status detection only scans the title, never the free-text description", () => {
+  // The description is the organizer's own prose and can legitimately
+  // mention a DIFFERENT show's cancellation/postponement while confirming
+  // this one — that must never flip THIS event's status.
+  const base = read("gigstix-event-kamelot.html");
+  const mutated = base.replace(
+    "<p>Kamelot je",
+    "<p>Nažalost, prošli koncert u Nišu je otkazan zbog vremenskih uslova, ali ovaj u Beogradu je potvrđen. Kamelot je",
+  );
+  const result = parseGigstixEvent(mutated, KAMELOT_URL);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.event.status, undefined);
+});
+
+test("[regression] a real title containing the digits '404' is not misdetected as a not-found page", () => {
+  const withRoomNumber = read("gigstix-event-kamelot.html").replace(
+    "<title>Kamelot",
+    "<title>Sala 404: Kamelot",
+  );
+  const result = parseGigstixEvent(withRoomNumber, KAMELOT_URL);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.event.title, "Sala 404: Kamelot");
+});
+
+test("[regression] the end-date row is found by its stable CSS class, matching every other detail row", () => {
+  // Every other row (start-date, venue, city) tries its stable `gt-*` class
+  // BEFORE falling back to the Serbian label text; end-date previously relied
+  // on the label alone, which would silently break if GIGS TIX ever
+  // rewords "Traje do" while keeping the same gt-end-date class.
+  const e = parseOk("gigstix-event-supercar.html", SUPERCAR_URL);
+  assert.equal(e.endLocal, "2026-05-10T19:00");
+
+  const relabeled = read("gigstix-event-supercar.html").replace(
+    "Traje do",
+    "Trajanje do", // a plausible copy change that keeps the same class
+  );
+  const result = parseGigstixEvent(relabeled, SUPERCAR_URL);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.event.endLocal, "2026-05-10T19:00");
 });

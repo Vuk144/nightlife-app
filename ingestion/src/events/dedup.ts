@@ -97,7 +97,15 @@ export function compareEvents(
   const sameVenue =
     aVenueId != null && bVenueId != null
       ? aVenueId === bVenueId
-      : computeNameNormalized(a.venue.name) === computeNameNormalized(b.venue.name);
+      : // Neither venue is resolved yet — fall back to name, but a name match
+        // alone is not enough: the same generic venue name (e.g. a chain, or
+        // a common word) can exist in different cities. Require an explicit,
+        // matching city too; an unstated city on either side is inconclusive,
+        // never treated as a match.
+        !!a.venue.city &&
+        !!b.venue.city &&
+        computeNameNormalized(a.venue.city) === computeNameNormalized(b.venue.city) &&
+        computeNameNormalized(a.venue.name) === computeNameNormalized(b.venue.name);
 
   const sameLocalDate = localDatePart(a.startLocal) === localDatePart(b.startLocal);
   const startDeltaMinutes = localMinutesBetween(a.startLocal, b.startLocal);
@@ -137,17 +145,23 @@ export function compareEvents(
       rationale: "same venue + same night + (title match or promoter match)",
     };
   }
-  if (sameLocalDate && (titleSimilarity >= 0.4 || promoterMatch)) {
+  // A club night can start before and run past midnight, so two events 5
+  // minutes apart can land on different CALENDAR dates. `sameLocalDate` alone
+  // would treat that as "different night" no matter how close in time they
+  // actually are. `sameNight` ADDS that case on top of `sameLocalDate` — it
+  // never narrows it: any same-calendar-date pair still counts (however far
+  // apart in the day), and a close-in-time pair across a date boundary now
+  // counts too, using the same cutoff the "different night" check below uses.
+  const sameNight =
+    sameLocalDate || (startDeltaMinutes != null && startDeltaMinutes <= 240);
+  if (sameNight && (titleSimilarity >= 0.4 || promoterMatch)) {
     return {
       signals,
       band: "probable",
       rationale: "same venue + same date + one weak corroborating signal",
     };
   }
-  if (
-    !sameLocalDate ||
-    (startDeltaMinutes != null && startDeltaMinutes > 240)
-  ) {
+  if (!sameNight) {
     return { signals, band: "separate", rationale: "same venue but different night" };
   }
   return { signals, band: "ambiguous", rationale: "insufficient evidence — hold for review" };

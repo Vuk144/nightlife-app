@@ -13,6 +13,7 @@
  */
 
 import { collapseWs, inlineText } from "../text.ts";
+import type { SourceVenue } from "../types.ts";
 import {
   cleanGigstixTitle,
   firstMatch,
@@ -20,29 +21,25 @@ import {
   stripNoise,
 } from "./gigstix-html.ts";
 
-export interface SourceVenueParse {
-  /** Stable venue id on the source (WordPress post id, else the slug). */
-  externalId: string;
-  sourceUrl: string;
-  name: string;
-  address: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  /** City text exactly as the source states it (e.g. "Beograd"). */
-  city: string | null;
-}
-
 export type GigstixVenueResult =
-  | { ok: true; venue: SourceVenueParse }
+  | { ok: true; venue: SourceVenue }
   | { ok: false; reason: string };
 
 const NOT_FOUND_MARKERS = ["stranica nije pron", "page not found"];
 
 function detailInner(html: string, label: string): string | null {
   // <li class="gt-*"> … <div class="gt-title">LABEL</div><div class="gt-inner">VALUE</div>
+  //
+  // The capture stops at the FIRST `</div>` after `gt-inner`'s own opening
+  // tag. That is correct only when nothing inside `gt-inner` is itself a
+  // `<div>` — true for the plain fixtures, but this theme (`wpb-js-composer`
+  // / Visual Composer) commonly wraps content in an empty decorative/icon
+  // `<div></div>` first. Skipping zero or more such EMPTY leading divs before
+  // capturing prevents the real value from being truncated to nothing.
   const re = new RegExp(
     `<div[^>]*class=["'][^"']*gt-title[^"']*["'][^>]*>\\s*${label}[^<]*<\\/div>\\s*` +
-      `<div[^>]*class=["'][^"']*gt-inner[^"']*["'][^>]*>([\\s\\S]*?)<\\/div>`,
+      `<div[^>]*class=["'][^"']*gt-inner[^"']*["'][^>]*>` +
+      `(?:\\s*<div[^>]*>\\s*<\\/div>\\s*)*([\\s\\S]*?)<\\/div>`,
     "i",
   );
   const inner = firstMatch(re, html);

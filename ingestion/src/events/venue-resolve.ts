@@ -91,7 +91,7 @@ export interface EventVenueResolution {
   address: string | null;
   latitude: number | null;
   longitude: number | null;
-  coordinatesSource: "source" | null;
+  coordinatesSource: string | null;
   sourceVenueId: string | null;
   locationConfidence: LocationConfidence;
 
@@ -550,8 +550,7 @@ export async function createVenueResolver(
         address: outcome.venue.address ?? event.venue.address ?? null,
         latitude: outcome.venue.latitude ?? null,
         longitude: outcome.venue.longitude ?? null,
-        coordinatesSource:
-          (outcome.venue.coordinates_source as "source" | null) ?? null,
+        coordinatesSource: outcome.venue.coordinates_source ?? null,
         locationConfidence: outcome.venue.latitude != null ? "coordinates" : "city-only",
         matchedVenueId: outcome.venue.id,
         matchTier: outcome.tier,

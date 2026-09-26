@@ -17,9 +17,11 @@ import {
   CAT_SPORT,
   CAT_STANDUP,
   CAT_THEATRE,
+  FESTIVAL_TOKENS,
   HARD_NEGATIVE,
   KIDS,
   MUSIC_STRONG,
+  NIGHT_TOKENS,
   NIGHTLIFE_SECONDARY,
   NON_MUSIC_FESTIVAL,
 } from "../../src/events/relevance-keywords.ts";
@@ -86,6 +88,8 @@ test("every set is non-empty and holds only lower-case de-accented tokens", () =
     NIGHTLIFE_SECONDARY,
     NON_MUSIC_FESTIVAL,
     KIDS,
+    FESTIVAL_TOKENS,
+    NIGHT_TOKENS,
   })) {
     assert.ok(set.size > 0, `${name} must not be empty`);
     for (const token of set) {
@@ -93,4 +97,21 @@ test("every set is non-empty and holds only lower-case de-accented tokens", () =
       assert.match(token, /^[a-z0-9]+$/, `${name}: "${token}" must be a single de-accented token`);
     }
   }
+});
+
+test("MUSIC_STRONG and NIGHTLIFE_SECONDARY never share a token (a shared one would be dead in the secondary list)", () => {
+  // every branch checks MUSIC_STRONG first, so a shared token could never
+  // produce a secondary result.
+  assert.deepEqual(intersection(MUSIC_STRONG, NIGHTLIFE_SECONDARY), []);
+});
+
+test("FESTIVAL_TOKENS / NIGHT_TOKENS are subsets of NIGHTLIFE_SECONDARY; it is disjoint from NON_MUSIC_FESTIVAL", () => {
+  // relevance.ts vetoes free-text festival-only evidence with NON_MUSIC_FESTIVAL
+  // by removing FESTIVAL_TOKENS from NIGHTLIFE_SECONDARY: an entry outside the
+  // secondary list would be a no-op, and a secondary token that is ALSO a
+  // non-music marker would veto itself.
+  for (const t of FESTIVAL_TOKENS) assert.ok(NIGHTLIFE_SECONDARY.has(t), t);
+  // same for NIGHT_TOKENS, which the `docek` branch removes from its evidence
+  for (const t of NIGHT_TOKENS) assert.ok(NIGHTLIFE_SECONDARY.has(t), t);
+  assert.deepEqual(intersection(NIGHTLIFE_SECONDARY, NON_MUSIC_FESTIVAL), []);
 });

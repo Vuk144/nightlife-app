@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregateEventFirstCandidates } from "../../src/events/event-first.ts";
+import { aggregateEventFirstCandidates, MAX_EXAMPLE_EVENTS } from "../../src/events/event-first.ts";
 import type { EventVenueResolution } from "../../src/events/venue-resolve.ts";
 
 function resolution(o: Partial<EventVenueResolution>): EventVenueResolution {
@@ -292,7 +292,7 @@ test("[determinism] exampleEvents selects the SAME <=5 examples for forward/reve
   const rev = aggregateEventFirstCandidates([...rs].reverse(), { maxNewVenues: 50 }).candidates[0];
 
   assert.equal(fwd.eventCount, 7);
-  assert.equal(fwd.exampleEvents.length, 5, "still capped at 5");
+  assert.equal(fwd.exampleEvents.length, MAX_EXAMPLE_EVENTS, "still capped");
   assert.deepEqual(fwd.exampleEvents, rev.exampleEvents);
   assert.deepEqual(
     fwd.exampleEvents.map((e) => e.url),
