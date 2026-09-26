@@ -28,11 +28,39 @@ const UNIVERSAL_PLACEHOLDERS: RegExp[] = [
   /^(location (tba|tbd|tbc|unknown|to be announced))$/i,
   /^(various( locations?)?|multiple locations?|different venues?)$/i,
   /^(online( event)?|virtual( event)?|live ?stream(ing)?|webinar|zoom|youtube|twitch)$/i,
-  /^[\s\-.?_]+$/,
+  // Whitespace + punctuation only (ASCII symbols, e.g. `$ + = ^ ~`, UNION
+  // Unicode punctuation, e.g. em/en dash, ellipsis, curly quotes), plus
+  // characters that are never content on their own: combining marks with no
+  // base letter (`\p{M}`, incl. emoji variation selectors), control chars
+  // (`\p{Cc}`) and lone surrogates (`\p{Cs}`). Invisible format chars
+  // (`\p{Cf}`) are stripped by `isPlaceholder` before any pattern runs. No
+  // letter or digit anywhere. This is the ONLY defense against a symbol-only name for
+  // a profile whose `normalizeName` never returns "" (e.g. `sr`, via
+  // `../name.ts`'s documented non-empty fallback — see `./normalization.ts`):
+  // `empty-normalized-name` cannot fire for such a profile, so this must catch
+  // it directly on `name`, independent of any normalization profile. It is
+  // ALSO the event path's only such defense, full stop — `VenueLinkHint` (the
+  // event's venue name hint) has no `normalizedName` field at all, so this is
+  // the sole net for a symbol-only event venue name, for every profile.
+  //
+  // Deliberately excludes `\p{S}` (Unicode Symbol) — unlike a "no letter or
+  // digit" test, this does NOT flag an emoji-only name (e.g. "🎵") or a
+  // standalone "★"/"©"/"®", which are real, intentional content, not
+  // placeholder filler (see validation.test.ts's astral-plane characterization).
+  /^[\s\p{P}\p{M}\p{Cc}\p{Cs}\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]+$/u,
 ];
 
+/**
+ * Invisible format characters (zero-width space/joiners, soft hyphen, word
+ * joiner, BOM, bidi marks). `String#trim` does not remove them, so without
+ * this a scraped "​TBA" would slip past every anchored pattern, and a
+ * name made only of them would look non-empty.
+ */
+const INVISIBLE_FORMAT_CHARS = /\p{Cf}/gu;
+
 function isPlaceholder(name: string, extra: RegExp[]): boolean {
-  const trimmed = name.trim();
+  const trimmed = name.replace(INVISIBLE_FORMAT_CHARS, "").trim();
+  if (!trimmed) return true;
   return (
     UNIVERSAL_PLACEHOLDERS.some((re) => re.test(trimmed)) ||
     extra.some((re) => re.test(trimmed))
@@ -109,6 +137,14 @@ export function validateRecord(input: {
     if (!withinBounds(coordinates, scope.bounds ?? country?.bounds ?? null)) {
       return review("coordinates-out-of-region");
     }
+    // A city that resolved but is disabled is distinct from one that never
+    // resolved: `resolveCity` (config.ts) has no `enabled` filter of its own,
+    // so a source whose discovery scope leaks past `citiesInScope` — that
+    // filter is a best-effort adapter hint, not a guarantee (see
+    // `AdapterContext.cities`'s "for adapters that can target" wording) — can
+    // still resolve to a city the operator has explicitly turned off. Held for
+    // review rather than silently becoming a live upsert.
+    if (scope.cityName && !scope.cityEnabled) return review("city-disabled");
     if (!scope.cityName) return review("city-unresolved");
     return ok;
   }
@@ -123,6 +159,7 @@ export function validateRecord(input: {
   if (venueHint.coordinates && !coordinatesArePhysical(venueHint.coordinates)) {
     return reject("invalid-coordinates");
   }
+  if (scope.cityName && !scope.cityEnabled) return review("city-disabled");
   if (!scope.cityName) return review("city-unresolved");
   return ok;
 }

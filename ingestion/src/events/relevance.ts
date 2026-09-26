@@ -22,9 +22,11 @@ import {
   CAT_SPORT,
   CAT_STANDUP,
   CAT_THEATRE,
+  FESTIVAL_TOKENS,
   HARD_NEGATIVE,
   KIDS,
   MUSIC_STRONG,
+  NIGHT_TOKENS,
   NIGHTLIFE_SECONDARY,
   NON_MUSIC_FESTIVAL,
 } from "./relevance-keywords.ts";
@@ -58,6 +60,23 @@ function hasAny(tokens: Set<string>, against: Set<string>): string | null {
   return null;
 }
 
+// `docek` (the New Year category's own name) is also listed in
+// NIGHTLIFE_SECONDARY for the free-text fallback (step 3) below. Reusing that
+// same set as-is inside the `docek`-category branch would be circular: a
+// title like "Doček Nove Godine" trivially contains the word "docek" and
+// would always satisfy its own "has a party signal" check, regardless of
+// whether the event has any ACTUAL music/party evidence beyond its category.
+// The same goes for the plain "night" words: every New Year listing is a night
+// ("novogodišnja noć"). This excludes those self-evident words for that branch.
+const NEWYEAR_PARTY_EVIDENCE = new Set(
+  [...NIGHTLIFE_SECONDARY].filter((token) => token !== CAT_NEWYEAR && !NIGHT_TOKENS.has(token)),
+);
+
+/** Nightlife evidence beyond merely "festival" — immune to the non-music veto. */
+const NIGHTLIFE_NON_FESTIVAL = new Set(
+  [...NIGHTLIFE_SECONDARY].filter((token) => !FESTIVAL_TOKENS.has(token)),
+);
+
 /**
  * Classify one event.
  *
@@ -68,7 +87,8 @@ function hasAny(tokens: Set<string>, against: Set<string>): string | null {
  *   2. for everything else, a hard-negative keyword gate (fairs, talks,
  *      exhibitions, sport, theatre, kids, motoring);
  *   3. then keyword evidence about the EVENT itself — a strong music word is
- *      enough for `primary`, a nightlife word for `secondary`;
+ *      enough for `primary`, a nightlife word for `secondary` (unless its only
+ *      nightlife evidence is a festival word next to a non-music marker);
  *   4. otherwise reject, with the reason.
  *
  * The venue is never consulted. Pure and deterministic.
@@ -121,7 +141,7 @@ export function classifyRelevance(input: RelevanceInput): RelevanceResult {
       return { accepted: false, reason: `New Year event, kids marker "${kids}"` };
     }
     const party =
-      hasAny(textTokens, NIGHTLIFE_SECONDARY) ?? hasAny(textTokens, MUSIC_STRONG);
+      hasAny(textTokens, NEWYEAR_PARTY_EVIDENCE) ?? hasAny(textTokens, MUSIC_STRONG);
     return party
       ? { accepted: true, tier: "secondary", reason: `New Year event + "${party}"` }
       : { accepted: false, reason: "New Year event with no music/party signal" };
@@ -147,6 +167,13 @@ export function classifyRelevance(input: RelevanceInput): RelevanceResult {
   }
   const secondary = hasAny(textTokens, NIGHTLIFE_SECONDARY);
   if (secondary) {
+    // Evidence that only says "festival" is no stronger than the `festival`
+    // category, so the same non-music veto applies — otherwise a wine
+    // festival rejected under its own category would pass as `dogadjaj`.
+    const nonMusic = hasAny(textTokens, NON_MUSIC_FESTIVAL);
+    if (nonMusic && !hasAny(textTokens, NIGHTLIFE_NON_FESTIVAL)) {
+      return { accepted: false, reason: `festival keyword, non-music marker "${nonMusic}"` };
+    }
     return { accepted: true, tier: "secondary", reason: `nightlife keyword "${secondary}"` };
   }
 

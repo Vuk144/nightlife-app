@@ -92,6 +92,28 @@ function report(over: Partial<DryRunReport> = {}): DryRunReport {
   return { stats: stats(), items: [], eventFirst: emptyAggregate, ...over };
 }
 
+/** Two `accepted` items for the SAME canonical event (same externalId), as if
+ * discovered via two different, overlapping sitemap entries. */
+function acceptedDuplicateDiscovery(externalId: string, title: string): DryRunItem[] {
+  const e = event({ externalId, title });
+  return [
+    {
+      url: `https://new.gigstix.com/sitemap-a.xml#${externalId}`,
+      stage: "accepted",
+      event: e,
+      relevance: { accepted: true, tier: "primary", reason: 'category "koncert"' },
+      identity: computeIdentity("gigstix", e, null),
+    },
+    {
+      url: `https://new.gigstix.com/sitemap-b.xml#${externalId}`,
+      stage: "accepted",
+      event: e,
+      relevance: { accepted: true, tier: "primary", reason: 'category "koncert"' },
+      identity: computeIdentity("gigstix", e, null),
+    },
+  ];
+}
+
 // ── tests ──────────────────────────────────────────────────────────
 
 test("[regression] the collision header does not claim 'same venue' for city-only events", () => {
@@ -113,6 +135,25 @@ test("[regression] the collision header does not claim 'same venue' for city-onl
     "header falsely asserts a shared venue for events that named only a city",
   );
   assert.match(out, /Same venue key \+ same date/);
+});
+
+test("[regression] the SAME event discovered twice (e.g. two overlapping sitemap entries) is not reported as a cross-source collision", () => {
+  // Same externalId in both items -> one already-deduped canonical event
+  // (plannedCanonicalInserts: 1 below), not two distinct events that happen
+  // to share a venue+date. The collision section must not flag it for review.
+  const items = acceptedDuplicateDiscovery("SAME1", "Kamelot");
+  const out = formatReport(
+    report({
+      items,
+      stats: stats({ accepted: 2, acceptedPrimary: 2, venuesNamed: 2, plannedCanonicalInserts: 1 }),
+    }),
+    { verbose: true },
+  );
+  assert.doesNotMatch(
+    out,
+    /Same venue key \+ same date/,
+    "a single event discovered twice must not be reported as a collision",
+  );
 });
 
 test("collision section is omitted entirely when there are no buckets with >1 accepted event", () => {
@@ -202,4 +243,16 @@ test("verbose vs non-verbose: the header counts are identical (only the detail d
   // detail sections appear only in verbose
   assert.doesNotMatch(quiet, /Rejected events \(/);
   assert.match(loud, /Rejected events \(1\)/);
+});
+
+test("a completely empty run (zero discovered, venue resolution NOT skipped) formats without crashing", () => {
+  // The all-zero, non-skipped path (every count 0, every reason-code map
+  // empty) is otherwise never exercised — every other test either sets
+  // `venueResolutionSkipped: true` or supplies at least one item.
+  const out = formatReport(report(), { verbose: false });
+  assert.match(out, /Discovered:\s+0/);
+  assert.match(out, /Event-first venue resolution \(per accepted event/);
+  assert.match(out, /matched_existing:\s+0/);
+  assert.match(out, /Event-first venue candidates \(deduped\): 0/);
+  assert.doesNotMatch(out, /undefined|NaN/);
 });

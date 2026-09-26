@@ -122,6 +122,43 @@ test("[4] an event whose venue is unknown produces a safe new-venue candidate (e
   assert.equal(plan.stats.venuesNew, 1);
 });
 
+test("[4][BUG regression] an event-first venue candidate must pass venue validation — never an empty normalizedName or a 1-char name", async () => {
+  // HR = latin profile: "★★" normalizes to "". The event itself is fine (the
+  // hint is not a placeholder), but before the fix the engine inserted the
+  // hint as a canonical venue with `normalizedName: ""` / name "X".
+  for (const [venueName, reasonCode] of [
+    ["★★", "empty-normalized-name"],
+    ["X", "name-too-short"],
+  ] as const) {
+    const adapter = createInMemoryAdapter({
+      key: "entrio-hr",
+      items: [
+        fakeItem(
+          eventRecord({
+            sourceKey: "entrio-hr",
+            externalId: `E-${venueName}`,
+            countryCode: "HR",
+            cityText: "Zagreb",
+            title: "Opening Rave",
+            startLocal: "2026-07-04T23:00",
+            venueName,
+          }),
+        ),
+      ],
+    });
+    const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+
+    assert.equal(plan.upserts.filter((u) => u.kind === "venue").length, 0, `no venue upsert for ${venueName}`);
+    assert.equal(plan.stats.venuesNew, 0);
+    const review = plan.reviewItems.find((r) => r.kind === "venue");
+    assert.equal(review?.reasonCode, reasonCode, venueName);
+    // the event itself is still planned, just without a venue link
+    const ev = plan.upserts.find((u) => u.kind === "event");
+    assert.equal(ev?.operation, "insert");
+    assert.equal(ev?.kind === "event" ? ev.resolvedVenueId : "?", null);
+  }
+});
+
 // ── 5: same event, same source, twice → still one event ───────────────
 test("[5] the same event from the same source stays the same canonical event", async () => {
   const store = seededStore();

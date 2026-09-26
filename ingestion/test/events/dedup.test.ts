@@ -68,3 +68,82 @@ test("compareEvents: same venue + same night, no corroboration -> ambiguous (nev
   const cmp = compareEvents(a, "v1", b, "v1");
   assert.equal(cmp.band, "ambiguous");
 });
+
+// ---- REGRESSIONS -----------------------------------------------------
+
+test("[regression] a club night crossing midnight with weak title overlap is 'probable', not wrongly 'separate'", () => {
+  // 23:50 -> 00:15 the next calendar date is 25 minutes apart in real time —
+  // `sameLocalDate` alone would call this a "different night".
+  const a = ev({ title: "Kokorico Label Night", startLocal: "2026-10-30T23:50" });
+  const b = ev({ externalId: "2", title: "Kokorico Label Showcase", startLocal: "2026-10-31T00:15" });
+  const cmp = compareEvents(a, "v1", b, "v1");
+  assert.equal(cmp.signals.sameLocalDate, false, "sanity: this pair DOES cross a calendar date");
+  assert.equal(cmp.band, "probable");
+});
+
+test("[regression] a club night crossing midnight with no corroboration is 'ambiguous', not wrongly 'separate'", () => {
+  const a = ev({ title: "Room One Opening", startLocal: "2026-10-30T23:50" });
+  const b = ev({ externalId: "2", title: "Basement Session", startLocal: "2026-10-31T00:15" });
+  const cmp = compareEvents(a, "v1", b, "v1");
+  assert.equal(cmp.band, "ambiguous");
+});
+
+test("[regression] same calendar date but hours apart still counts as 'same night' for a weak signal (sameNight adds midnight tolerance, never narrows same-date)", () => {
+  // Locks in that the midnight-crossing fix above is ADDITIVE: any pair on
+  // the same calendar date must still qualify, however far apart in the day
+  // — this exact scenario broke once during development of that fix, when
+  // `sameLocalDate` was replaced by a 240-minute cutoff instead of widened by one.
+  const a = ev({ title: "Alpha", startLocal: "2026-07-01T18:00", promoter: "Kokorico" });
+  const b = ev({
+    externalId: "2",
+    title: "Totally Different",
+    startLocal: "2026-07-01T23:30",
+    promoter: "Kokorico",
+  });
+  const cmp = compareEvents(a, "v1", b, "v1");
+  assert.equal(cmp.signals.sameLocalDate, true);
+  assert.equal(cmp.band, "probable");
+});
+
+test("[regression] with unresolved venue ids, the SAME venue name in DIFFERENT cities is never sameVenue", () => {
+  const a = ev({ title: "Friday Night", venue: { name: "Caffe Bar Corner", city: "Belgrade" } });
+  const b = ev({
+    externalId: "2",
+    title: "Friday Night",
+    venue: { name: "Caffe Bar Corner", city: "Novi Sad" },
+  });
+  const cmp = compareEvents(a, null, b, null);
+  assert.equal(cmp.signals.sameVenue, false);
+  assert.equal(cmp.band, "separate");
+});
+
+test("[regression] with unresolved venue ids, the same name in the SAME city still matches (no regression)", () => {
+  const a = ev({ title: "Friday Night", venue: { name: "Caffe Bar Corner", city: "Belgrade" } });
+  const b = ev({
+    externalId: "2",
+    title: "Friday Night",
+    venue: { name: "Caffe Bar Corner", city: "Belgrade" },
+  });
+  const cmp = compareEvents(a, null, b, null);
+  assert.equal(cmp.signals.sameVenue, true);
+  assert.equal(cmp.band, "automatic");
+});
+
+test("[regression] with unresolved venue ids, a matching name but unstated city on either side is inconclusive, not a match", () => {
+  const a = ev({ title: "Friday Night", venue: { name: "Caffe Bar Corner" } });
+  const b = ev({
+    externalId: "2",
+    title: "Friday Night",
+    venue: { name: "Caffe Bar Corner", city: "Belgrade" },
+  });
+  const cmp = compareEvents(a, null, b, null);
+  assert.equal(cmp.signals.sameVenue, false);
+});
+
+test("[determinism] compareEvents is symmetric — swapping which event is 'a' and which is 'b' does not change the result", () => {
+  const a = ev({ title: "Intercell with DVS1" });
+  const b = ev({ externalId: "2", title: "Intercell with DVS1 (Belgrade)", startLocal: "2026-10-30T23:30" });
+  const forward = compareEvents(a, "v1", b, "v1");
+  const reverse = compareEvents(b, "v1", a, "v1");
+  assert.deepEqual(forward, reverse);
+});

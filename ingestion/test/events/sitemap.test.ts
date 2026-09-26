@@ -82,3 +82,41 @@ test("parseSitemapEntries: tolerates empty / malformed XML", () => {
   assert.deepEqual(parseSitemapEntries(""), []);
   assert.deepEqual(parseSitemapEntries("<urlset><url><lastmod>x</lastmod></url></urlset>"), []);
 });
+
+test("parseSitemapEntries: a <loc> with no <lastmod> still parses (lastmod undefined)", () => {
+  const entries = parseSitemapEntries(
+    "<urlset><url><loc>https://new.gigstix.com/event/no-lastmod/</loc></url></urlset>",
+  );
+  assert.deepEqual(entries, [{ url: "https://new.gigstix.com/event/no-lastmod/", lastmod: undefined }]);
+});
+
+// ---- REGRESSIONS -------------------------------------------------------
+
+test("[regression] XML entities decode without cascading: &amp;lt; stays literal text, never becomes '<'", () => {
+  // decodeXmlEntities previously decoded &amp; FIRST, so a genuinely
+  // XML-escaped "&amp;lt;" (representing the literal text "&lt;", not
+  // markup) would decode to "&lt;" and then get decoded a SECOND time by
+  // the &lt; replacement into "<" — producing a URL character that was
+  // never actually present in the source.
+  const entries = parseSitemapEntries(
+    "<urlset><url><loc>https://new.gigstix.com/event/x/?note=&amp;lt;VIP&amp;gt;</loc></url></urlset>",
+  );
+  assert.equal(entries[0].url, "https://new.gigstix.com/event/x/?note=&lt;VIP&gt;");
+});
+
+test("[regression] the realistic case (multiple &amp;-joined query params) still decodes correctly", () => {
+  const entries = parseSitemapEntries(
+    "<urlset><url><loc>https://new.gigstix.com/event/x/?a=1&amp;b=2&amp;c=3</loc></url></urlset>",
+  );
+  assert.equal(entries[0].url, "https://new.gigstix.com/event/x/?a=1&b=2&c=3");
+});
+
+test("[determinism] orderEventRefs output does not depend on input array order", () => {
+  const all = [
+    ...parseSitemapEntries(read("gigstix-event-sitemap.xml")),
+    ...parseSitemapEntries(read("gigstix-event-sitemap2.xml")),
+  ];
+  const forward = orderEventRefs(all, 0);
+  const reversed = orderEventRefs([...all].reverse(), 0);
+  assert.deepEqual(forward, reversed);
+});

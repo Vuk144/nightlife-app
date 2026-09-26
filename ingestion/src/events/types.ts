@@ -48,6 +48,13 @@ export type StartPrecision = "datetime" | "date";
 
 /** A venue as named by an event source — not yet resolved to our `venues` row. */
 export interface NormalizedVenueRef {
+  /**
+   * Required, not optional — but `""` is a valid, meaningful value: a
+   * city-only listing that names no specific venue. Every consumer of this
+   * field (identity, resolution, reporting) treats an empty/blank name as
+   * "no venue," never as an error; do not add a required-non-empty
+   * validation here.
+   */
   name: string;
   address?: string;
   lat?: number;
@@ -103,6 +110,16 @@ export interface NormalizedEvent {
    * NOT imply `"scheduled"` and it NEVER implies cancellation. A source must
    * only report `"cancelled"` / `"postponed"` on an EXPLICIT signal, never
    * because the event was omitted from a listing.
+   *
+   * `../sync/types.ts#EventFields.status` is the same union but REQUIRED, and
+   * documents `"scheduled"` as "the source said so, or said nothing" — that is
+   * the intended collapse of UNSET into `"scheduled"` for that layer, not a
+   * contradiction of this field's stricter, adapter-facing distinction. Do not
+   * invent a third ("unknown") persisted status to preserve that distinction
+   * further downstream.
+   *
+   * A `"rescheduled"` event has no separate original-date field: `startLocal`
+   * (and `endLocal`/`doorsLocal`) must already be the NEW date/time.
    */
   status?: "scheduled" | "cancelled" | "postponed" | "rescheduled";
 

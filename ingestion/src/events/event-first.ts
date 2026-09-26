@@ -27,7 +27,7 @@ export interface EventFirstCandidate {
   address: string | null;
   latitude: number | null;
   longitude: number | null;
-  coordinatesSource: "source" | null;
+  coordinatesSource: string | null;
   sourceVenueId: string | null;
   venuePageUrl: string | null;
   locationConfidence: EventVenueResolution["locationConfidence"];
@@ -79,6 +79,14 @@ function mergeCoords(
 
 const CONFIDENCE_RANK: Record<EventVenueResolution["locationConfidence"], number> =
   { coordinates: 3, address: 2, "city-only": 1, none: 0 };
+
+/** Cap on `exampleEvents` per candidate — a report readability limit, not a domain rule. */
+export const MAX_EXAMPLE_EVENTS = 5;
+
+/** Add `code` to `codes` unless it is already present — every `reasonCodes` merge is a set union. */
+function addReasonCode(codes: string[], code: string): void {
+  if (!codes.includes(code)) codes.push(code);
+}
 
 /**
  * Total-order code-unit (UTF-16) string compare -> -1 | 0 | 1. Deliberately NOT
@@ -165,15 +173,14 @@ export function aggregateEventFirstCandidates(
       continue;
     }
     existing.eventCount++;
-    // `relevant` is pre-sorted by (url, title), so keeping the first five
-    // encountered = the five globally-smallest by that key — a deterministic
-    // selection, chosen BEFORE truncation, not a sort applied after it.
-    if (existing.exampleEvents.length < 5) {
+    // `relevant` is pre-sorted by (url, title), so keeping the first
+    // MAX_EXAMPLE_EVENTS encountered = the globally-smallest by that key — a
+    // deterministic selection, chosen BEFORE truncation, not a sort applied
+    // after it.
+    if (existing.exampleEvents.length < MAX_EXAMPLE_EVENTS) {
       existing.exampleEvents.push({ title: r.event.title, url: r.event.url });
     }
-    for (const code of r.reasonCodes) {
-      if (!existing.reasonCodes.includes(code)) existing.reasonCodes.push(code);
-    }
+    for (const code of r.reasonCodes) addReasonCode(existing.reasonCodes, code);
     if (r.status === "needs_review") existing.status = "needs_review";
 
     // Genuine conflicts across contributions that share ONE candidateKey. The
@@ -182,9 +189,7 @@ export function aggregateEventFirstCandidates(
     // substantive disagreement is a real data-quality signal — never auto-safe.
     if (r.normalizedName !== existing.normalizedName) {
       existing.status = "needs_review";
-      if (!existing.reasonCodes.includes("conflicting-venue-name-across-events")) {
-        existing.reasonCodes.push("conflicting-venue-name-across-events");
-      }
+      addReasonCode(existing.reasonCodes, "conflicting-venue-name-across-events");
     }
     if (existing.city == null && r.city != null) {
       // never keep a null city when a later contribution actually has one
@@ -192,9 +197,7 @@ export function aggregateEventFirstCandidates(
       existing.cityEnabled = r.cityEnabled;
     } else if (r.city != null && existing.city != null && r.city !== existing.city) {
       existing.status = "needs_review";
-      if (!existing.reasonCodes.includes("conflicting-city-across-events")) {
-        existing.reasonCodes.push("conflicting-city-across-events");
-      }
+      addReasonCode(existing.reasonCodes, "conflicting-city-across-events");
     }
 
     if (CONFIDENCE_RANK[r.locationConfidence] > CONFIDENCE_RANK[existing.locationConfidence]) {
@@ -215,9 +218,7 @@ export function aggregateEventFirstCandidates(
     safeSeen++;
     if (safeSeen > cap) {
       c.status = "needs_review";
-      if (!c.reasonCodes.includes("over-per-run-cap")) {
-        c.reasonCodes.push("over-per-run-cap");
-      }
+      addReasonCode(c.reasonCodes, "over-per-run-cap");
       demotedByCap++;
     }
   }

@@ -63,6 +63,17 @@ test("decodeEntities: single pass only — WordPress double-escaping is preserve
   assert.equal(decodeEntities("&amp;nbsp;"), "&nbsp;");
 });
 
+test("[regression] decodeEntities: a numeric entity that decodes to '&' is not chained into a further named-entity decode", () => {
+  // `&#38;` decodes to the literal character "&". A separate later pass over
+  // that output would then read the following "amp;" as ITS OWN entity and
+  // decode it again, silently doing two decode levels instead of one — the
+  // exact invariant the WordPress-double-escaping test above locks for named
+  // entities must hold for this numeric-to-named chain too.
+  assert.equal(decodeEntities("&#38;amp;"), "&amp;");
+  assert.equal(decodeEntities("&#x26;amp;"), "&amp;");
+  assert.equal(decodeEntities("price &#38;lt; 10"), "price &lt; 10");
+});
+
 test("decodeEntities: leaves non-entity ampersands and unknown names untouched", () => {
   assert.equal(decodeEntities("Tom & Jerry"), "Tom & Jerry");
   assert.equal(decodeEntities("R&D and A&B"), "R&D and A&B");

@@ -32,12 +32,18 @@ export function parseSitemapEntries(xml: string): SitemapEntry[] {
 }
 
 function decodeXmlEntities(value: string): string {
+  // `&amp;` MUST decode LAST. Decoding it first can cascade: a literal
+  // "&amp;lt;" (a real XML-escaped "&lt;" text, not markup) would decode to
+  // "&lt;" after the &amp; step, and the SAME pass's later &lt; replacement
+  // would then wrongly decode that into "<" — producing a URL character that
+  // was never actually present. Doing the narrower entities first means none
+  // of them can ever match text that only exists because of an &amp; decode.
   return value
-    .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
-    .replace(/&#0*39;|&apos;/g, "'");
+    .replace(/&#0*39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 /** A child sitemap that holds event-detail URLs. */
@@ -72,9 +78,13 @@ export function orderEventRefs(
       byUrl.set(url, lastmod);
     }
   }
+  // Code-unit comparison, not `localeCompare`: this order must depend only on
+  // the (url, lastmod) data, never on locale collation rules that can rank
+  // two DISTINCT strings as equal and make the result depend on input order.
+  const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
   const ordered = [...byUrl.entries()].sort((a, b) => {
-    const cmp = (b[1] ?? "").localeCompare(a[1] ?? "");
-    return cmp !== 0 ? cmp : a[0].localeCompare(b[0]);
+    const cmp = byCodeUnit(b[1] ?? "", a[1] ?? "");
+    return cmp !== 0 ? cmp : byCodeUnit(a[0], b[0]);
   });
   const capped = limit > 0 ? ordered.slice(0, limit) : ordered;
   return capped.map(([url, lastmod]) => ({ url, ref: eventSlug(url), lastmod }));

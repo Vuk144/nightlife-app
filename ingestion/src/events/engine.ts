@@ -97,6 +97,11 @@ function bump(counter: Record<string, number>, key: string): void {
   counter[key] = (counter[key] ?? 0) + 1;
 }
 
+// Run-health heuristics — not a domain invariant, just "bad enough to warn a
+// human about", so they live as named constants rather than bare literals.
+const FETCH_FAILURE_DEGRADED_THRESHOLD = 0.5;
+const PARSE_FAILURE_DEGRADED_THRESHOLD = 0.3;
+
 function emptyStats(source: string, scope: DryRunScope): DryRunStats {
   return {
     source,
@@ -385,14 +390,20 @@ export async function runEventDryRun(opts: {
 
   // ---- run health --------------------------------------------------
   stats.durationMs = Date.now() - startedAt;
-  if (stats.fetchFailed > 0 && stats.fetchFailed / stats.discovered >= 0.5) {
+  if (
+    stats.fetchFailed > 0 &&
+    stats.fetchFailed / stats.discovered >= FETCH_FAILURE_DEGRADED_THRESHOLD
+  ) {
     stats.status = "degraded";
     stats.notes.push(
       `high fetch-failure rate: ${stats.fetchFailed}/${stats.discovered}`,
     );
   }
   const parseAttempts = stats.parsed + stats.parseFailed;
-  if (parseAttempts > 0 && stats.parseFailed / parseAttempts >= 0.3) {
+  if (
+    parseAttempts > 0 &&
+    stats.parseFailed / parseAttempts >= PARSE_FAILURE_DEGRADED_THRESHOLD
+  ) {
     stats.status = "degraded";
     stats.notes.push(
       `high parse-failure rate: ${stats.parseFailed}/${parseAttempts} — adapter may need attention`,

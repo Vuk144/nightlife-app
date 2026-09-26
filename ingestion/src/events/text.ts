@@ -23,18 +23,26 @@ const NAMED_ENTITIES: Record<string, string> = {
   rdquo: "”",
 };
 
-/** Decode the HTML entities that actually occur in this data (named + numeric). */
+/**
+ * Decode the HTML entities that actually occur in this data (named + numeric).
+ *
+ * ONE combined regex, not three sequential `.replace()` passes: a numeric
+ * entity can decode to a literal "&" (e.g. `&#38;`), and running a separate
+ * named-entity pass AFTER the numeric passes would then re-scan that "&" —
+ * chaining `&#38;amp;` into "&" instead of leaving it as "&amp;". A single
+ * pass never re-scans its own substituted output, so this can't happen.
+ */
 export function decodeEntities(input: string): string {
-  return input
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
-      safeFromCodePoint(parseInt(hex, 16)),
-    )
-    .replace(/&#(\d+);/g, (_, dec) => safeFromCodePoint(Number(dec)))
-    .replace(/&([a-zA-Z][a-zA-Z0-9]+);/g, (whole, name) =>
-      Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, name)
+  return input.replace(
+    /&(?:#x([0-9a-fA-F]+)|#(\d+)|([a-zA-Z][a-zA-Z0-9]+));/g,
+    (whole, hex, dec, name) => {
+      if (hex !== undefined) return safeFromCodePoint(parseInt(hex, 16));
+      if (dec !== undefined) return safeFromCodePoint(Number(dec));
+      return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, name)
         ? NAMED_ENTITIES[name]
-        : whole,
-    );
+        : whole;
+    },
+  );
 }
 
 function safeFromCodePoint(code: number): string {

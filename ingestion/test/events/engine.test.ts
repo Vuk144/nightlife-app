@@ -280,6 +280,20 @@ test("[fetch] HTTP 500 → fetch-failed item, remaining events still processed",
   assert.equal(r.stats.fetchFailureReasons["HTTP 500"], 1);
 });
 
+test("[fetch] status below 200 (e.g. an aborted/CORS-style 0) → fetch-failed, not treated as success", async () => {
+  const adapter = scriptedAdapter({
+    script: [
+      { url: "https://src.test/event/e1/", outcome: { http: 0 } },
+      acceptedEvent("https://src.test/event/e2/", "E2"),
+    ],
+  });
+  const r = await run({ adapter });
+  assert.equal(r.stats.fetchFailed, 1);
+  assert.equal(r.stats.fetched, 1, "the sub-200 response is not counted as fetched");
+  assert.equal(r.items.find((i) => i.stage === "fetch-failed")!.reason, "HTTP 0");
+  assert.equal(r.stats.fetchFailureReasons["HTTP 0"], 1);
+});
+
 // ════════════════════════════════════════════════════════════════════
 //  PARSE  (per-event isolation)
 // ════════════════════════════════════════════════════════════════════
@@ -514,6 +528,26 @@ test("[aggregation] an aggregation exception cannot silently yield a 'successful
   assert.equal(r.items.filter((i) => i.stage === "accepted").length, 2);
 });
 
+test("[aggregation] the per-run cap being exceeded surfaces as a run-level note", async () => {
+  const adapter = scriptedAdapter({
+    script: [
+      acceptedEvent("https://src.test/event/e1/", "E1"),
+      acceptedEvent("https://src.test/event/e2/", "E2"),
+    ],
+  });
+  const resolver = scriptedResolver((event) =>
+    resolution({ candidateKey: `k-${event.externalId}`, status: "safe_new_venue" }),
+  );
+  const r = await run({ adapter, resolver, cap: 1 });
+
+  assert.equal(r.eventFirst.capExceeded, true, "two distinct safe candidates over a cap of 1");
+  assert.equal(r.eventFirst.demotedByCap, 1);
+  assert.match(
+    r.stats.notes.join(" "),
+    /per-run cap \(1\) exceeded — 1 safe candidate\(s\) demoted to needs_review/,
+  );
+});
+
 // ════════════════════════════════════════════════════════════════════
 //  RUN HEALTH
 // ════════════════════════════════════════════════════════════════════
@@ -616,6 +650,19 @@ test("[counters] every invariant holds across a mixed run", async () => {
   assert.equal(s.acceptedSecondary, 1); // stand-up
   assert.equal(s.venuesNamed, 2);
   assert.equal(s.noVenueInSource, 1);
+});
+
+test("[counters] the SAME externalId discovered twice increments plannedCanonicalInserts only once", async () => {
+  // e.g. the same event reachable from two overlapping sitemap entries.
+  const adapter = scriptedAdapter({
+    script: [
+      acceptedEvent("https://src.test/event/dup-a/", "SAME"),
+      acceptedEvent("https://src.test/event/dup-b/", "SAME"),
+    ],
+  });
+  const r = await run({ adapter, resolver: scriptedResolver(() => resolution()) });
+  assert.equal(r.stats.accepted, 2, "both refs are still processed and counted as accepted");
+  assert.equal(r.stats.plannedCanonicalInserts, 1, "one canonical event, seen twice");
 });
 
 // ════════════════════════════════════════════════════════════════════

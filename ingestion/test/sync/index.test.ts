@@ -2,10 +2,12 @@
  * `../../src/sync/index.ts` — the sync public-surface barrel.
  *
  * The barrel is pure `export * from "./<module>.ts"`: no logic, no side effects.
- * These are characterization guards for the EXPORT SURFACE — `tsc` already
- * proves every re-export path type-checks, but it does NOT catch a symbol
- * silently dropped by an `export *` name collision, a module accidentally
- * removed from the barrel, or a submodule gaining a throw-on-import.
+ * These are characterization guards for the EXPORT SURFACE. `tsc --noEmit`
+ * does reject a conflicting `export *` name (TS2308), but `npm test` runs
+ * through tsx WITHOUT type-checking — at runtime an ESM `export *` collision
+ * silently drops the name. These tests also catch what tsc never can: a
+ * module accidentally removed from the barrel, or a submodule gaining a
+ * throw-on-import.
  */
 
 import { test } from "node:test";

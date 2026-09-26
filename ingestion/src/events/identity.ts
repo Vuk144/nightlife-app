@@ -40,15 +40,26 @@ export function computeIdentity(
   event: NormalizedEvent,
   resolvedVenueId: string | null,
 ): EventIdentity {
+  // `.trim()` before the truthiness check (matching `venue-resolve.ts`'s own
+  // gate) so a whitespace-only name — truthy, but normalizing to "" — falls
+  // through to the city key instead of collapsing every such event into one
+  // `name:` bucket regardless of actual venue/city.
+  const trimmedVenueName = event.venue.name.trim();
   const venueKey = resolvedVenueId
     ? `venue:${resolvedVenueId}`
-    : event.venue.name
-      ? `name:${computeNameNormalized(event.venue.name)}`
+    : trimmedVenueName
+      ? `name:${computeNameNormalized(trimmedVenueName)}`
       : `city:${computeNameNormalized(event.venue.city ?? "unknown")}`;
   const localDate = localDatePart(event.startLocal);
   return {
     sourceKey: `${sourceKey}:${event.externalId}`,
-    identityKey: sha1(`${venueKey}|${localDate}`),
+    // JSON-encode the tuple rather than joining with "|": `venueKey` can, in
+    // a degenerate case, itself contain "|" (computeNameNormalized's fallback
+    // for a name with NO Latin/Cyrillic/digit characters at all leaves the
+    // raw string untouched — verified: computeNameNormalized("|||") === "|||").
+    // A plain join could then let two DIFFERENT (venueKey, localDate) pairs
+    // hash to the same identityKey; JSON.stringify's escaping cannot.
+    identityKey: sha1(JSON.stringify([venueKey, localDate])),
     venueKey,
     localDate,
   };
