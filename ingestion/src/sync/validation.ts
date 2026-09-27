@@ -18,6 +18,7 @@
  */
 
 import { PLACEHOLDER_REGEX_FLAGS } from "./config.ts";
+import { validateEventContract } from "./event-contract.ts";
 import type { CountryConfig } from "./config.ts";
 import type { GeoBounds, NormalizedRecord, ResolvedScope, ValidationResult } from "./types.ts";
 
@@ -149,12 +150,12 @@ export function validateRecord(input: {
     return ok;
   }
 
-  // event
-  const title = record.fields.title?.trim() ?? "";
-  if (!title) return reject("missing-title");
-  if (!record.fields.startLocal) return reject("missing-start");
-  const venueHint = record.links.venue;
-  if (!venueHint || !venueHint.name?.trim()) return review("event-no-venue-named");
+  // event: the normalized-event contract first (source, title, start/end
+  // times, venue identity — see ./event-contract.ts), then config-aware checks.
+  const contract = validateEventContract(record, scope.timeZone);
+  if (contract) return contract;
+  const venueHint = record.links.venue!; // the contract guarantees a name or a source venue id
+  if (!venueHint.name?.trim()) return review("event-no-venue-named");
   if (isPlaceholder(venueHint.name, extra)) return reject("placeholder-venue-name");
   if (venueHint.coordinates && !coordinatesArePhysical(venueHint.coordinates)) {
     return reject("invalid-coordinates");
