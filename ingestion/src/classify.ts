@@ -10,8 +10,9 @@ import { findRescue } from "./rescue.ts";
  *
  * Order (first hit wins; hard exclusions always win over everything):
  *
- *   0. hard exclusions — lifecycle, shop, office, excluded amenities,
- *      lodging-only, elderly community centre, private/members without a signal
+ *   0. hard exclusions — lifecycle, institutional (never bypassable), shop,
+ *      office, excluded amenities, lodging-only, elderly community centre,
+ *      private/members without a signal
  *   1. Layer C — curated city rescue list (data, not code)
  *   2. Layer B name layers — kafana/mehana/... names; splav names; shisha names
  *   3. Layer A — automatic global nightlife categories
@@ -103,12 +104,43 @@ const EXCLUDED_AMENITIES = new Set([
 ]);
 
 /**
+ * Institutional HARD EXCLUSIONS: objects that are never nightlife venues,
+ * whatever else they are tagged with. Checked first in `classifyOsmElement`,
+ * before the pinned excluded-amenity exception and before any Layer C rescue,
+ * so no rescue (pinned or by name) can ever accept one — and an excluded
+ * element never becomes a venue record, so it never reaches identity matching
+ * or a store upsert. Deliberately small; `office=government` is the one
+ * government category the tag model represents.
+ */
+export const INSTITUTIONAL_HARD_EXCLUSIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  amenity: new Set(["place_of_worship", "school", "university", "hospital", "clinic", "library"]),
+  healthcare: new Set(["hospital", "clinic"]),
+  office: new Set(["government"]),
+};
+
+/** The institutional hard-exclusion reason for these tags, or `null`. */
+export function institutionalHardExclusion(tags: Record<string, string>): string | null {
+  for (const [key, values] of Object.entries(INSTITUTIONAL_HARD_EXCLUSIONS)) {
+    const value = lower(tags[key]);
+    if (value && values.has(value)) return `institutional hard exclusion: ${key}=${value}`;
+  }
+  return null;
+}
+
+/**
  * Excluded amenities a Layer C rescue may still accept — and only for an entry
  * pinned by its exact `osmRef` that declares the amenity in
  * `excludedAmenityAllowed` (see `./rescue.ts`). Deliberately minimal: every
  * other excluded amenity stays excluded even when pinned.
  */
-const PINNED_RESCUE_BYPASSABLE_AMENITIES = new Set(["conference_centre"]);
+export const PINNED_RESCUE_BYPASSABLE_AMENITIES: ReadonlySet<string> = new Set(["conference_centre"]);
+
+// An institutional exclusion must never be made bypassable.
+for (const amenity of PINNED_RESCUE_BYPASSABLE_AMENITIES) {
+  if (INSTITUTIONAL_HARD_EXCLUSIONS.amenity.has(amenity)) {
+    throw new Error(`amenity=${amenity} is an institutional hard exclusion and cannot be rescue-bypassable`);
+  }
+}
 
 /**
  * True when `ref` is pinned by a rescue entry that explicitly allows this
@@ -284,7 +316,8 @@ export function classifyOsmElement(
   const keys = Object.keys(tags);
 
   // 0. hard exclusions — win over everything, including a rescue entry (sole
-  //    exception: an explicitly allowed excluded amenity on a pinned rescue)
+  //    exception: an explicitly allowed excluded amenity on a pinned rescue,
+  //    which can never be an institutional exclusion)
   const lifecycleKey = keys.find((key) =>
     LIFECYCLE_PREFIXES.some((prefix) => key.startsWith(prefix)),
   );
@@ -292,6 +325,9 @@ export function classifyOsmElement(
   if (lower(tags.disused) === "yes" || lower(tags.abandoned) === "yes") {
     return { accepted: false, reason: "disused / abandoned" };
   }
+  // institutional objects: no exception, no rescue can ever reach them
+  const institutional = institutionalHardExclusion(tags);
+  if (institutional) return { accepted: false, reason: institutional };
 
   const amenity = lower(tags.amenity);
   const club = lower(tags.club);
