@@ -56,6 +56,14 @@ export const CROSS_SOURCE_VENUE_IDENTITIES: CrossSourceVenueIdentity[] = [
     canonical: { sourceKey: "OpenStreetMap", externalId: "node/4162210293" },
     note: 'GIGS TIX "KST" = the OSM venue now named "Клуб студената технике".',
   },
+  {
+    countryCode: "RS",
+    cityName: "Belgrade",
+    sourceKey: "gigstix",
+    externalId: "barrel-house",
+    canonical: { sourceKey: "OpenStreetMap", externalId: "node/12068261369" },
+    note: 'GIGS TIX "Barrel house" (Žorža Klemansoa 19) is part of the OSM venue "Belgrade Urban Distillery" at the same address.',
+  },
 ];
 
 export type CrossSourceIdentityResult =
