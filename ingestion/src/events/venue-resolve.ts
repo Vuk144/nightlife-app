@@ -22,6 +22,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { findAlias } from "../aliases.ts";
+import { CITY_ALIASES } from "../city-aliases.ts";
 import { resolveMatch, type MatchOutcome } from "../matching.ts";
 import { computeNameNormalized } from "../name.ts";
 import type { ExistingVenue, NormalizedVenue } from "../types.ts";
@@ -29,15 +30,6 @@ import type { NormalizedEvent, SourceVenue } from "./types.ts";
 
 const VENUE_COLUMNS =
   "id, name, name_normalized, source_id, external_id, source_url, latitude, longitude, coordinates_source, address, website, opening_hours, wikidata, city_id";
-
-/** Source city text -> our `cities.name` (English exonyms for the big cities). */
-const CITY_ALIASES: Record<string, string> = {
-  beograd: "Belgrade",
-  belgrade: "Belgrade",
-  "novi sad": "Novi Sad",
-  nis: "Niš",
-  "nis srbija": "Niš",
-};
 
 /** Deterministic placeholder / non-venue name patterns (EN + SR). */
 const PLACEHOLDER_PATTERNS: { code: string; re: RegExp }[] = [
