@@ -34,6 +34,7 @@ import type {
   NormalizedRecord,
   ResolvedScope,
   ReviewItem,
+  RunCompleteness,
   SourceAdapter,
   SourceStateSnapshot,
   StoredRecordState,
@@ -62,6 +63,14 @@ export interface PlanSyncInput {
   now: string;
   runId: string;
   limit?: number;
+  /**
+   * `"complete"` (default): the run sees the source's whole current record
+   * set, so a stored record it did not see progresses through reconciliation.
+   * `"partial"`: the run covers only part of the source (e.g. one event), so
+   * only records it SAW take part in reconciliation — nothing else is touched.
+   * A `limit` that cuts discovery short always makes the run partial.
+   */
+  completeness?: RunCompleteness;
   /**
    * Curated cross-source venue identities, checked for an event's venue hint
    * before the name tiers — same rule as `./event-venue-match.ts` (see
@@ -122,10 +131,15 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
 
   // ── discover ──────────────────────────────────────────────────────
   const refs = [];
+  let completeness: RunCompleteness = input.completeness ?? "complete";
   try {
     for await (const ref of adapter.discover(adapterCtx)) {
       refs.push(ref);
-      if (adapterCtx.limit > 0 && refs.length >= adapterCtx.limit) break;
+      if (adapterCtx.limit > 0 && refs.length >= adapterCtx.limit) {
+        // the source may hold more than we took — never reconcile as if complete
+        completeness = "partial";
+        break;
+      }
     }
   } catch (error) {
     stats.status = "failed";
@@ -136,7 +150,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
       runStatus: "failed",
       actions: [],
       skippedReason: "discovery failed",
-    }, input, startedAtMs);
+    }, input, startedAtMs, completeness);
   }
   stats.discovered = refs.length;
 
@@ -212,8 +226,19 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   }
 
   // ── reconciliation ───────────────────────────────────────────────
-  const snapshots = await buildSnapshots(store, source, now);
-  if (adapter.capabilities.snapshotRefs) {
+  const allSnapshots = await buildSnapshots(store, source, now);
+  // A partial run speaks only for the records it saw: a stored record outside
+  // the run is not "missing", so it takes no part in reconciliation at all.
+  const snapshots =
+    completeness === "partial" ? allSnapshots.filter((s) => seenKeys.has(s.key)) : allSnapshots;
+  if (snapshots.length < allSnapshots.length) {
+    stats.notes.push(
+      `partial run: ${allSnapshots.length - snapshots.length} stored record(s) not seen in this run were not reconciled`,
+    );
+  }
+  // The snapshot guards judge a COMPLETE snapshot (a missing partition, a
+  // collapse); a partial run is small by design and reconciles nothing unseen.
+  if (adapter.capabilities.snapshotRefs && completeness === "complete") {
     guardSnapshotRun(stats, snapshots, seenKeys, cfg.reconciliation.minDiscoveryRatio);
   }
   const reconciliation = planReconciliation({
@@ -233,7 +258,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
     if (a.transition === "mark-gone") stats.byChangeStatus.GONE++;
   }
 
-  return finish(stats, upserts, reviewItems, reconciliation, input, startedAtMs);
+  return finish(stats, upserts, reviewItems, reconciliation, input, startedAtMs, completeness);
 }
 
 /**
@@ -859,6 +884,7 @@ function finish(
   reconciliation: SyncPlan["reconciliation"],
   input: PlanSyncInput,
   startedAtMs: number,
+  completeness: RunCompleteness,
 ): SyncPlan {
   stats.durationMs = Math.max(0, Date.now() - startedAtMs);
   return {
@@ -871,6 +897,7 @@ function finish(
         countries: input.source.scope.countries,
         cities: input.source.scope.cities,
       },
+      completeness,
     },
     upserts,
     reconciliation,

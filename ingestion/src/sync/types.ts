@@ -407,12 +407,21 @@ export interface ReviewItem {
   suggestedCanonicalId: string | null;
 }
 
+/**
+ * Does a run cover the source's COMPLETE current record set, or only part of
+ * it (one event, a hand-picked batch, a `limit`-truncated discovery)? Only a
+ * complete run may reconcile stored records it did not see.
+ */
+export type RunCompleteness = "complete" | "partial";
+
 export interface SyncRunContext {
   runId: string;
   sourceKey: string;
   startedAt: string;
   mode: "plan" | "apply";
   scope: { countries: string[]; cities: string[] };
+  /** Always set by `planSync`; absent (a hand-built plan) reads as "complete". */
+  completeness?: RunCompleteness;
 }
 
 export interface SyncRunStats {
