@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 
 import { parseGigstixEventRecord } from "../../src/sync/adapters/gigstix-event.ts";
 import { DEFAULT_RECONCILIATION, InMemoryConfigProvider } from "../../src/sync/config.ts";
+import { eventInstants, validateEventContract } from "../../src/sync/event-contract.ts";
 import { matchEventVenue, matchEventVenueInStore } from "../../src/sync/event-venue-match.ts";
 import { serbianProfile } from "../../src/sync/normalization.ts";
 import { InMemoryCanonicalStore, type CanonicalVenue } from "../../src/sync/store.ts";
@@ -259,6 +260,54 @@ test("8. end to end (real GIGS page → store): resolves to Драгстор, an
   );
   assert.equal(unknown.status, "unresolved");
   assert.deepEqual(store.venues.map((v) => v.id), ["v-ds", "v-kst"]);
+});
+
+test("PLAN-ONLY end to end: Intercell (GIGS 25772) → normalized event → matcher → cross-source identity → OSM node/5302622223 'Драгстор'", async () => {
+  // 1. GIGS HTML → normalized event
+  const event = intercell();
+  assert.equal(event.provenance.sourceKey, "gigstix");
+  assert.equal(event.provenance.externalId, "25772");
+  assert.equal(event.fields.title, "Intercell with DVS1");
+  assert.deepEqual(event.links.venue, { name: "Drugstore", sourceVenueId: "drugstore", address: null, coordinates: null, cityText: "Beograd" });
+  assert.equal(event.fields.timeZone, "Europe/Belgrade");
+  assert.equal(validateEventContract(event, null), null, "passes the event contract");
+  assert.deepEqual(eventInstants(event.fields, null), { ok: true, startAt: "2026-10-30T22:00:00.000Z", endAt: null });
+
+  // 2. the real store read path (SupabaseCanonicalStore over the fake DB), apply spied on
+  const fake = new FakeSupabase();
+  fake.seed("countries", [{ id: "RS", name: "Serbia" }]);
+  fake.seed("cities", [{ id: "city-bg", country_id: "RS", name: "Belgrade" }]);
+  fake.seed("data_sources", [{ id: "ds-osm", name: "OpenStreetMap", type: "api" }]);
+  fake.seed("venues", [
+    { id: "uuid-dragstor", city_id: "city-bg", name: "Драгстор", name_normalized: "dragstor", latitude: 44.8185264, longitude: 20.488357, coordinates_source: "manual", source_id: "ds-osm", external_id: "node/5302622223", source_url: "https://www.openstreetmap.org/node/5302622223", is_active: true, created_at: "x", updated_at: "x" },
+    { id: "uuid-kst", city_id: "city-bg", name: "Клуб студената технике", name_normalized: "studenata tehnike", source_id: "ds-osm", external_id: "node/4162210293", is_active: true, created_at: "x", updated_at: "x" },
+  ]);
+  const store = new SupabaseCanonicalStore(fake.asClient());
+  let applyCalls = 0;
+  store.apply = async () => {
+    applyCalls++;
+    throw new Error("apply must not be called in a plan-only flow");
+  };
+
+  // 3. matcher → cross-source identity → the existing canonical venue
+  const match = await matchEventVenueInStore(event, { config: provider(), store, crossSourceIdentities: CROSS_SOURCE_VENUE_IDENTITIES });
+  assert.equal(match.status, "matched");
+  if (match.status !== "matched") return;
+  assert.equal(match.venueId, "uuid-dragstor", "the EXISTING canonical row — not a new venue");
+  assert.equal(match.venueName, "Драгстор");
+  assert.match(match.note, /source identity/);
+
+  const canonical = await store.getVenueById(match.venueId);
+  assert.equal(canonical?.sourceKey, "OpenStreetMap");
+  assert.equal(canonical?.externalId, "node/5302622223");
+  assert.equal(canonical?.name, "Драгстор");
+
+  // 4. read-only: nothing applied, written or created
+  assert.equal(applyCalls, 0);
+  assert.deepEqual(fake.writes, []);
+  assert.deepEqual(fake.tables.venues.map((v) => v.id), ["uuid-dragstor", "uuid-kst"]);
+  assert.equal(fake.tables.data_sources.length, 1);
+  assert.equal(fake.tables.events.length, 0);
 });
 
 test("9. the OSM/generic identity path does not consult curated cross-source identities", () => {
