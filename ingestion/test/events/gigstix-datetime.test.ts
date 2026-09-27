@@ -52,11 +52,8 @@ test("parseSerbianDateTime: rejects nonsense / unknown month / impossible day", 
   assert.equal(parseSerbianDateTime("29. februara 2027."), null); // 2027 not a leap year
 });
 
-test("parseSerbianDateTime: out-of-range time falls back to date precision", () => {
-  assert.deepEqual(parseSerbianDateTime("5. juna 2026. 25.00"), {
-    local: "2026-06-05",
-    precision: "date",
-  });
+test("[BUG regression] parseSerbianDateTime: an out-of-range time is a failure, not a date-only fallback", () => {
+  assert.equal(parseSerbianDateTime("5. juna 2026. 25.00"), null);
 });
 
 // ── contract characterization (audit) ──────────────────────────────
@@ -74,17 +71,15 @@ test("parseSerbianDateTime: every real GIGS TIX 'Datum i vreme' / 'Traje do' str
   }
 });
 
-test("parseSerbianDateTime: a recognizable date with an explicitly INVALID time -> date precision, never a failure", () => {
-  // The docstring: null is ONLY for an unrecognizable day/month/year. A garbage
-  // time must not poison a valid date — the event stays ingestible as a
-  // date-precision event (locked so a future change can't silently drop it).
+test("[BUG regression] parseSerbianDateTime: a recognizable date with an explicitly INVALID time -> null, never a date-only event", () => {
+  // Previously this fell back to { local: "2026-10-30", precision: "date" }:
+  // a start time the page DID state was silently replaced by "local midnight"
+  // once the event contract resolved it. A malformed time is malformed data.
   for (const bad of ["25.00", "24.00", "23.99", "23.60", "00.99"]) {
-    assert.deepEqual(
-      parseSerbianDateTime(`petak 30. oktobra 2026. ${bad}`),
-      { local: "2026-10-30", precision: "date" },
-      bad,
-    );
+    assert.equal(parseSerbianDateTime(`petak 30. oktobra 2026. ${bad}`), null, bad);
   }
+  // a date with NO time at all is still a valid date-precision value
+  assert.deepEqual(parseSerbianDateTime("petak 30. oktobra 2026."), { local: "2026-10-30", precision: "date" });
 });
 
 test("parseSerbianDateTime: hour/minute boundaries that ARE valid", () => {
