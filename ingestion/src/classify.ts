@@ -102,6 +102,25 @@ const EXCLUDED_AMENITIES = new Set([
   "social_facility", "vending_machine",
 ]);
 
+/**
+ * Excluded amenities a Layer C rescue may still accept — and only for an entry
+ * pinned by its exact `osmRef` that declares the amenity in
+ * `excludedAmenityAllowed` (see `./rescue.ts`). Deliberately minimal: every
+ * other excluded amenity stays excluded even when pinned.
+ */
+const PINNED_RESCUE_BYPASSABLE_AMENITIES = new Set(["conference_centre"]);
+
+/**
+ * True when `ref` is pinned by a rescue entry that explicitly allows this
+ * excluded `amenity`. The empty name means a name-matched (osmRef-less) entry
+ * can never match, so only an exact-osmRef pin qualifies.
+ */
+function pinnedRescueAllowsAmenity(amenity: string, ref?: string, target?: IngestionTarget): boolean {
+  if (!ref || !target || !PINNED_RESCUE_BYPASSABLE_AMENITIES.has(amenity)) return false;
+  const entry = findRescue(target.countryId, target.cityName, ref, "");
+  return entry?.osmRef === ref && entry.excludedAmenityAllowed === amenity;
+}
+
 const LODGING_TOURISM = new Set([
   "hotel", "hostel", "guest_house", "motel", "apartment",
   "chalet", "resort", "camp_site", "caravan_site",
@@ -264,7 +283,8 @@ export function classifyOsmElement(
 ): ClassifyResult {
   const keys = Object.keys(tags);
 
-  // 0. hard exclusions — win over everything, including a rescue entry
+  // 0. hard exclusions — win over everything, including a rescue entry (sole
+  //    exception: an explicitly allowed excluded amenity on a pinned rescue)
   const lifecycleKey = keys.find((key) =>
     LIFECYCLE_PREFIXES.some((prefix) => key.startsWith(prefix)),
   );
@@ -283,7 +303,7 @@ export function classifyOsmElement(
   // not exclusions — `truthy()` filters the no/none/false/0 family.
   if (truthy(tags.shop)) return { accepted: false, reason: `shop=${tags.shop}` };
   if (truthy(tags.office)) return { accepted: false, reason: `office=${tags.office}` };
-  if (amenity && EXCLUDED_AMENITIES.has(amenity)) {
+  if (amenity && EXCLUDED_AMENITIES.has(amenity) && !pinnedRescueAllowsAmenity(amenity, ref, target)) {
     return { accepted: false, reason: `amenity=${amenity}` };
   }
   if (tags.tourism && LODGING_TOURISM.has(lower(tags.tourism)) && !amenity && !club) {

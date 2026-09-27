@@ -6,8 +6,11 @@
  * global classifier logic — city venue names never appear in Layer A/B code.
  *
  * A rescue never overrides a hard exclusion (lifecycle / shop / office /
- * lodging-only), and it is completely independent of event data: a rescued
- * venue is valid whether or not any event is ever attached to it.
+ * excluded amenity / lodging-only / private access) — with ONE narrow
+ * exception: an entry pinned by `osmRef` may declare `excludedAmenityAllowed`
+ * for an amenity that `classify.ts` explicitly lists as bypassable (currently
+ * only `conference_centre`). A rescue is completely independent of event
+ * data: a rescued venue is valid whether or not any event is ever attached.
  *
  * Every entry is sourced from the project's Recall Audit v1/v2 and the
  * finalised product scope. Nothing is invented.
@@ -36,6 +39,12 @@ export interface RescueEntry {
   category: VenueCategory;
   /** Confirmed canonical OSM object: "node/123" | "way/123" | "relation/123". */
   osmRef?: string;
+  /**
+   * An otherwise hard-excluded amenity this entry's pinned OSM object carries
+   * and may keep. Honoured ONLY for an `osmRef` entry, and only when the
+   * amenity is also in `classify.ts#PINNED_RESCUE_BYPASSABLE_AMENITIES`.
+   */
+  excludedAmenityAllowed?: "conference_centre";
   note: string;
 }
 
@@ -143,6 +152,15 @@ export const RESCUE_ENTRIES: RescueEntry[] = [
     category: "bar",
     osmRef: "node/6782874303",
     note: "Known old-town cocktail bar (Kralja Petra). OSM node/6782874303 amenity=cafe + bar=yes — the stricter Recall v2 cafe rule (bar=yes on a cafe is only a weak signal) correctly drops it; rescued here as a confirmed genuine bar rather than by weakening the global cafe rule (Recall Audit v2 QA).",
+  },
+  {
+    countryId: "RS", cityName: "Belgrade",
+    name: "Sava Centar",
+    aliases: ["Sava Centar", "Сава центар"],
+    category: "concert_hall",
+    osmRef: "way/203161878",
+    excludedAmenityAllowed: "conference_centre",
+    note: "Congress centre that hosts concerts (GIGS TIX venue `sava-centar`, e.g. event 25572). OSM way/203161878 amenity=conference_centre wikidata=Q1278216 website=savacentar.net addr Милентија Поповића 9 — hard-excluded as a conference_centre, so pinned with an explicit excludedAmenityAllowed (Recall Audit follow-up, 2026-09-27). The separate way/1384308588 'Плава дворана Сава центра' is a hall inside the complex, not this object.",
   },
 ];
 
