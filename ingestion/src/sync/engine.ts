@@ -19,6 +19,11 @@ import { profileFor } from "./normalization.ts";
 import { planReconciliation } from "./reconcile.ts";
 import { comparable, type CanonicalStore, type SourceLink } from "./store.ts";
 import { toInstantMs } from "./time-zone.ts";
+import {
+  resolveCrossSourceIdentity,
+  type CrossSourceIdentityResult,
+  type CrossSourceVenueIdentity,
+} from "./venue-cross-source-identity.ts";
 import { resolveVenueIdentity, type VenueMatchCandidate } from "./venue-identity.ts";
 import { validateRecord } from "./validation.ts";
 import type {
@@ -57,6 +62,13 @@ export interface PlanSyncInput {
   now: string;
   runId: string;
   limit?: number;
+  /**
+   * Curated cross-source venue identities, checked for an event's venue hint
+   * before the name tiers — same rule as `./event-venue-match.ts` (see
+   * `./venue-cross-source-identity.ts`). Pass `CROSS_SOURCE_VENUE_IDENTITIES`;
+   * omitted = none.
+   */
+  crossSourceIdentities?: CrossSourceVenueIdentity[];
 }
 
 export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
@@ -177,6 +189,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
         eventFirstCandidateKeys,
         claimedVenueIds,
         reservedVenueIds,
+        crossSourceIdentities: input.crossSourceIdentities ?? [],
       });
     }
   }
@@ -288,6 +301,8 @@ interface ProcessCtx {
   reviewItems: ReviewItem[];
   seenKeys: Set<string>;
   linkedVenueCache: Map<string, NormalizedRecord | null>;
+  /** `PlanSyncInput.crossSourceIdentities` ([] when omitted). */
+  crossSourceIdentities: CrossSourceVenueIdentity[];
   /**
    * `sourceKey:externalId` of every event-first venue candidate already
    * decided this run. Several events at the same unknown venue name ONE
@@ -499,7 +514,33 @@ async function processEvent(
   let venueIdentity: IdentityOutcome | null = null;
   const hint = record.links.venue;
 
-  if (hint && scope.cityId && scope.cityName && scope.countryCode) {
+  // The source's own venue id first: a curated cross-source identity (or a
+  // conflict around that id) is authoritative over any name — the same rule
+  // as `./event-venue-match.ts#matchEventVenue`.
+  const crossSource = await eventVenueSourceIdentity(record, scope, ctx);
+  if (crossSource.status === "matched") {
+    resolvedVenueId = crossSource.venueId;
+    venueIdentity = {
+      entity: "venue",
+      decision: "matched",
+      tier: 0,
+      canonicalId: crossSource.venueId,
+      reasonCode: "venue-source-identity",
+      note: crossSource.note,
+    };
+    stats.venuesMatched++;
+  } else if (crossSource.status === "review") {
+    ctx.reviewItems.push({
+      kind: "venue",
+      reasonCode: crossSource.reasonCode,
+      reasons: [crossSource.note],
+      record: { ...record },
+      suggestedCanonicalId: crossSource.candidates[0]?.id ?? null,
+    });
+    stats.reviewItems++;
+  }
+
+  if (crossSource.status === "none" && hint && scope.cityId && scope.cityName && scope.countryCode) {
     let venueName = hint.name;
     let coordinates = hint.coordinates;
     let address = hint.address;
@@ -700,6 +741,24 @@ async function processEvent(
 }
 
 // ── helpers ───────────────────────────────────────────────────────
+/** `resolveCrossSourceIdentity` for an event's venue hint; `none` when there are no curated identities. */
+async function eventVenueSourceIdentity(
+  record: Extract<NormalizedRecord, { kind: "event" }>,
+  scope: ResolvedScope,
+  ctx: ProcessCtx,
+): Promise<CrossSourceIdentityResult> {
+  const hint = record.links.venue;
+  if (!hint?.sourceVenueId || ctx.crossSourceIdentities.length === 0) return { status: "none" };
+  if (!scope.cityId || !scope.cityName || !scope.countryCode) return { status: "none" };
+  return resolveCrossSourceIdentity({
+    sourceKey: record.provenance.sourceKey,
+    externalId: hint.sourceVenueId,
+    city: { countryCode: scope.countryCode, cityName: scope.cityName },
+    identities: ctx.crossSourceIdentities,
+    venues: await ctx.store.listVenuesInCity(scope.cityId),
+  });
+}
+
 function decideOperation(
   status: ChangeStatus,
   identity: IdentityOutcome,
