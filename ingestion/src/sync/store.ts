@@ -199,12 +199,12 @@ export function comparable(record: CanonicalUpsert["record"]): Record<string, Js
     return {
       name: f.name,
       normalizedName: f.normalizedName,
-      address: f.address,
+      address: f.address ?? null,
       lat: f.coordinates?.latitude ?? null,
       lon: f.coordinates?.longitude ?? null,
-      website: f.website,
-      wikidata: f.wikidata,
-      openingHours: f.openingHours,
+      website: f.website ?? null,
+      wikidata: f.wikidata ?? null,
+      openingHours: f.openingHours ?? null,
       description: f.description ?? null,
       // The store persists (and reconstructs) times as `HH:MM` via
       // `normalizeTimeOfDay`; the comparable must use the SAME shape or a source
@@ -407,12 +407,12 @@ export class InMemoryCanonicalStore implements CanonicalStore {
         countryCode: up.record.scope.countryCode ?? "",
         name: f.name,
         normalizedName: f.normalizedName,
-        address: f.address,
+        address: f.address ?? null,
         coordinates: snapshot(f.coordinates),
         coordinatesSource: f.coordinatesSource,
-        website: f.website,
-        wikidata: f.wikidata,
-        openingHours: f.openingHours,
+        website: f.website ?? null,
+        wikidata: f.wikidata ?? null,
+        openingHours: f.openingHours ?? null,
         description: f.description ?? null,
         // Parity with `SupabaseCanonicalStore.insertVenueRow`: times land as `HH:MM`.
         openingTime: normalizeTimeOfDay(f.openingTime),

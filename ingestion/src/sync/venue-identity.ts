@@ -54,6 +54,12 @@ export interface VenueIdentityRequest {
   incoming: VenueIdentityInput;
   scope: { countryCode: string; cityName: string };
   existingInCity: VenueMatchCandidate[];
+  /**
+   * Ids of existing venues this incoming record may NOT link to — already
+   * claimed by another record in the same run (the matcher's `consumed` set).
+   * Read-only here: the caller decides when a match becomes a claim.
+   */
+  consumed?: ReadonlySet<string>;
 }
 
 /*
@@ -112,7 +118,7 @@ export function resolveVenueIdentity(req: VenueIdentityRequest): IdentityOutcome
     },
     osmSourceId: req.incoming.source.sourceKey,
     existing: req.existingInCity.map(toExistingVenue),
-    consumed: new Set<string>(),
+    consumed: new Set<string>(req.consumed ?? []),
   };
 
   const outcome = resolveMatch(toIncomingVenue(req.incoming), ctx);

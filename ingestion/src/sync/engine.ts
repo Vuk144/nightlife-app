@@ -35,6 +35,7 @@ import type {
   SyncPlan,
   SyncRunStats,
   ValidationResult,
+  VenueFields,
 } from "./types.ts";
 
 const ZERO_CHANGE_COUNTS: Record<ChangeStatus, number> = {
@@ -91,6 +92,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   const seenKeys = new Set<string>();
   const linkedVenueCache = new Map<string, NormalizedRecord | null>();
   const eventFirstCandidateKeys = new Set<string>();
+  const claimedVenueIds = new Set<string>();
 
   const primaryCountry =
     config.country(source.scope.countries[0] ?? null) ??
@@ -152,10 +154,14 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
     }
     if (!parsed.ok) {
       stats.parseFailed++;
+      stats.notes.push(
+        `parse failed (${ref.externalId ?? ref.url}): ${parsed.reason}${parsed.detail ? ` — ${parsed.detail}` : ""}`,
+      );
       continue;
     }
     stats.parsed++;
 
+    const reservedVenueIds = await reserveOwnedVenues(store, parsed.records);
     for (const record of parsed.records) {
       await processRecord(record, {
         adapter,
@@ -169,6 +175,8 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
         seenKeys,
         linkedVenueCache,
         eventFirstCandidateKeys,
+        claimedVenueIds,
+        reservedVenueIds,
       });
     }
   }
@@ -192,6 +200,9 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
 
   // ── reconciliation ───────────────────────────────────────────────
   const snapshots = await buildSnapshots(store, source, now);
+  if (adapter.capabilities.snapshotRefs) {
+    guardSnapshotRun(stats, snapshots, seenKeys, cfg.reconciliation.minDiscoveryRatio);
+  }
   const reconciliation = planReconciliation({
     runStatus: stats.status,
     healthy: stats.healthy,
@@ -212,6 +223,59 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   return finish(stats, upserts, reviewItems, reconciliation, input, startedAtMs);
 }
 
+/**
+ * Extra health rules for a source whose refs are complete snapshots
+ * (`SourceCapabilities.snapshotRefs`). The generic ratio rules above allow a
+ * few failed pages; for a snapshot source one failed or empty ref is a whole
+ * partition (e.g. a city) that would read as "all its records disappeared",
+ * and a result far smaller than what was synced before is a collapse, not a
+ * mass closure. Either makes the run unhealthy, so reconciliation is skipped.
+ */
+function guardSnapshotRun(
+  stats: SyncRunStats,
+  snapshots: SourceStateSnapshot[],
+  seenKeys: Set<string>,
+  minDiscoveryRatio: number,
+): void {
+  const unhealthy = (note: string) => {
+    stats.status = stats.status === "failed" ? "failed" : "degraded";
+    stats.healthy = false;
+    stats.notes.push(note);
+  };
+  const failedRefs = stats.fetchFailed + stats.parseFailed;
+  if (failedRefs > 0) {
+    unhealthy(
+      `snapshot source: ${failedRefs} of ${stats.discovered} refs failed or were empty — ` +
+        `a whole partition is missing, reconciliation skipped`,
+    );
+  }
+  // Baseline: stored records reconciliation could still act on.
+  const baseline = snapshots.filter((s) => !s.frozen && !s.cancelled && s.sourceStatus !== "gone");
+  const seen = baseline.filter((s) => seenKeys.has(s.key)).length;
+  if (baseline.length > 0 && seen / baseline.length < minDiscoveryRatio) {
+    unhealthy(
+      `collapsed result: only ${seen} of ${baseline.length} previously synced records seen ` +
+        `(< minDiscoveryRatio ${minDiscoveryRatio}) — reconciliation skipped`,
+    );
+  }
+}
+
+/**
+ * The OPTIONAL members of `VenueFields` — the venue fields where the model
+ * separates "source does not provide this" (`undefined`) from an explicit value.
+ * Each name is also its `comparable()` key.
+ */
+const OPTIONAL_VENUE_FIELDS = [
+  "address",
+  "website",
+  "wikidata",
+  "openingHours",
+  "description",
+  "openingTime",
+  "closingTime",
+  "isActive",
+] as const satisfies readonly (keyof VenueFields)[];
+
 // ── one record through the pipeline ────────────────────────────────
 interface ProcessCtx {
   adapter: SourceAdapter;
@@ -231,6 +295,33 @@ interface ProcessCtx {
    * `venuesNew`) or its own identical review item.
    */
   eventFirstCandidateKeys: Set<string>;
+  /**
+   * Existing venue ids already linked by a venue record earlier in this run.
+   * One canonical venue is one real place: a later record matching it must
+   * not link it too (the matcher's `consumed` set, shared for the whole run).
+   */
+  claimedVenueIds: Set<string>;
+  /**
+   * For the current parsed batch: existing venue id → the external id that
+   * already owns it by exact source identity. The owner always gets its own
+   * row, even when a weaker (e.g. same-name) match from another record in the
+   * batch is processed first.
+   */
+  reservedVenueIds: Map<string, string>;
+}
+
+/** Existing venues owned (by exact source identity) by a venue record in `records`. */
+async function reserveOwnedVenues(
+  store: CanonicalStore,
+  records: NormalizedRecord[],
+): Promise<Map<string, string>> {
+  const reserved = new Map<string, string>();
+  for (const r of records) {
+    if (r.kind !== "venue") continue;
+    const owned = await store.getVenueBySource(r.provenance.sourceKey, r.provenance.externalId);
+    if (owned) reserved.set(owned.id, r.provenance.externalId);
+  }
+  return reserved;
 }
 
 async function processRecord(input: NormalizedRecord, ctx: ProcessCtx): Promise<void> {
@@ -277,7 +368,7 @@ async function processVenue(
   record2: Extract<NormalizedRecord, { kind: "venue" }>,
   scope: ResolvedScope,
   validation: ValidationResult,
-  _normalize: (s: string) => string,
+  normalize: (s: string) => string,
   ctx: ProcessCtx,
 ): Promise<void> {
   const { store, now, stats } = ctx;
@@ -292,19 +383,27 @@ async function processVenue(
     note: "scope unresolved",
   };
   if (scope.cityId && scope.cityName && scope.countryCode) {
-    const existing = (await store.listVenuesInCity(scope.cityId)).map(toVenueMatchCandidate);
+    const existing = (await store.listVenuesInCity(scope.cityId)).map((v) =>
+      toVenueMatchCandidate(v, normalize),
+    );
+    const blocked = new Set(ctx.claimedVenueIds);
+    for (const [id, owner] of ctx.reservedVenueIds) {
+      if (owner !== record2.provenance.externalId) blocked.add(id);
+    }
     identity = resolveVenueIdentity({
       incoming: {
         source: record2.provenance,
         name: record2.fields.name,
         normalizedName,
         coordinates: record2.fields.coordinates,
-        address: record2.fields.address,
-        website: record2.fields.website,
-        wikidata: record2.fields.wikidata,
+        // omitted and null are the same thing to the matcher
+        address: record2.fields.address ?? null,
+        website: record2.fields.website ?? null,
+        wikidata: record2.fields.wikidata ?? null,
       },
       scope: { countryCode: scope.countryCode, cityName: scope.cityName },
       existingInCity: existing,
+      consumed: blocked,
     });
   }
 
@@ -314,6 +413,26 @@ async function processVenue(
     record2.provenance.externalId,
   );
   const venueComparable = comparable(record2);
+  // Manual coordinates are never overwritten by a source (both stores enforce
+  // it on write), so the source's coordinates can never be persisted there.
+  // Compare what WOULD be persisted: the stored pin. Otherwise the difference
+  // alone reads as UPDATED on every run. Every other field still compares.
+  if (storedLink) {
+    const current = await store.getVenueById(storedLink.canonicalId);
+    if (current?.coordinatesSource === "manual") {
+      venueComparable.lat = current.coordinates?.latitude ?? null;
+      venueComparable.lon = current.coordinates?.longitude ?? null;
+    }
+    // Same rule for an OPTIONAL field the source does not provide at all
+    // (`undefined`, e.g. OSM has no description / opening times): nothing is
+    // written, so the stored value stands. An explicit `null` is a value the
+    // source asserted and still compares.
+    for (const key of OPTIONAL_VENUE_FIELDS) {
+      if (record2.fields[key] === undefined) {
+        venueComparable[key] = storedLink.comparableFields[key] ?? null;
+      }
+    }
+  }
   const change = detectChange({
     // The hash is over the canonical comparable fields — not the adapter's raw
     // hash — so any store can reconstruct the same value from a persisted row.
@@ -343,6 +462,9 @@ async function processVenue(
   );
   if (identity.decision === "matched") stats.venuesMatched++;
   else if (operation === "insert") stats.venuesNew++;
+  // Only a record that actually gets an upsert claims its venue — a rejected
+  // or held record above never blocks a later valid one.
+  if (operation !== "insert" && canonicalId) ctx.claimedVenueIds.add(canonicalId);
 
   ctx.upserts.push({
     kind: "venue",
@@ -398,13 +520,15 @@ async function processEvent(
         venueName = linked.fields.name?.trim() ? linked.fields.name : venueName;
         coordinates = linked.fields.coordinates ?? coordinates;
         address = linked.fields.address ?? address;
-        website = linked.fields.website;
-        wikidata = linked.fields.wikidata;
+        website = linked.fields.website ?? null;
+        wikidata = linked.fields.wikidata ?? null;
         venueExternalId = linked.provenance.externalId || venueExternalId;
       }
     }
 
-    const existing = (await store.listVenuesInCity(scope.cityId)).map(toVenueMatchCandidate);
+    const existing = (await store.listVenuesInCity(scope.cityId)).map((v) =>
+      toVenueMatchCandidate(v, normalize),
+    );
     venueIdentity = resolveVenueIdentity({
       incoming: {
         source: { sourceKey: p.sourceKey, externalId: venueExternalId, sourceUrl: null },
@@ -592,11 +716,17 @@ function decideOperation(
   return { operation: "skip", canonicalId };
 }
 
-function toVenueMatchCandidate(v: import("./store.ts").CanonicalVenue): VenueMatchCandidate {
+function toVenueMatchCandidate(
+  v: import("./store.ts").CanonicalVenue,
+  normalize: (s: string) => string,
+): VenueMatchCandidate {
   return {
     id: v.id,
     name: v.name,
-    normalizedName: v.normalizedName,
+    // A row whose stored name_normalized is NULL (read as "", e.g. a hand-seeded
+    // venue) would never match by name. Derive it in memory with the country's
+    // profile — nothing is written here; an explicit UPDATE writes it.
+    normalizedName: v.normalizedName || normalize(v.name),
     sourceKey: v.sourceKey,
     externalId: v.externalId,
     sourceUrl: v.sourceUrl,

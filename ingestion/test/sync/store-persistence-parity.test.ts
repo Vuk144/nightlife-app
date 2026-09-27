@@ -482,3 +482,200 @@ test("[parity] manual venue coordinates survive AND the link still reflects the 
   assert.deepEqual(after.coordinates, { latitude: 44.81111, longitude: 20.46222 });
   assert.equal(store.venues.filter((v) => v.externalId === "v-1").length, 1);
 });
+
+// ── manual coordinates vs change detection ───────────────────────────
+async function pinnedDepo() {
+  const store = seededStore();
+  await runVenue(store, { name: "Depo", coordinates: { latitude: 44.8, longitude: 20.45 } }, "r1");
+  const v = store.venues.find((x) => x.externalId === "v-1")!;
+  v.coordinates = { latitude: 44.81111, longitude: 20.46222 };
+  v.coordinatesSource = "manual";
+  return store;
+}
+
+test("[manual-coords regression] a source coordinate that differs ONLY from a manual pin is UNCHANGED, and the pin stays authoritative", async () => {
+  const store = await pinnedDepo();
+  // Before the fix: UPDATED on every run (manual coords compared against the source's).
+  const u = await runVenue(store, { name: "Depo", coordinates: { latitude: 45.0, longitude: 21.0 } }, "r2");
+  assert.equal(u.changeStatus, "UNCHANGED");
+  const row = (await store.getVenueBySource("osm", "v-1"))!;
+  assert.deepEqual(row.coordinates, { latitude: 44.81111, longitude: 20.46222 });
+  assert.equal(row.coordinatesSource, "manual");
+});
+
+test("[manual-coords] every NON-coordinate comparable field still produces UPDATED on a manual-pinned venue", async () => {
+  // Set on the record's fields directly — `venueRecord` has no input for
+  // every field (e.g. wikidata / openingHours), and must not silently drop one.
+  const cases: Partial<Extract<NormalizedRecord, { kind: "venue" }>["fields"]>[] = [
+    { name: "Depo Club" },
+    { normalizedName: "depo club" },
+    { address: "Nova 1" },
+    { website: "https://depo.example" },
+    { wikidata: "Q42" },
+    { openingHours: "Fr 22:00-04:00" },
+    { description: "techno" },
+    { openingTime: "22:00" },
+    { closingTime: "04:00" },
+    { isActive: false },
+  ];
+  for (const over of cases) {
+    const store = await pinnedDepo();
+    const base = venueRecord({
+      sourceKey: "osm",
+      externalId: "v-1",
+      countryCode: "RS",
+      cityText: "Belgrade",
+      name: "Depo",
+      coordinates: { latitude: 45.0, longitude: 21.0 },
+    }) as Extract<NormalizedRecord, { kind: "venue" }>;
+    const rec: NormalizedRecord = { ...base, fields: { ...base.fields, ...over } };
+    const adapter = createInMemoryAdapter({ key: "osm", items: [fakeItem(rec)] });
+    const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store, now: NOW, runId: "r2" });
+    assert.equal(plan.upserts.find((u) => u.kind === "venue")?.changeStatus, "UPDATED", JSON.stringify(over));
+  }
+});
+
+test("[manual-coords] a SOURCE-owned coordinate change is still UPDATED and written", async () => {
+  const store = seededStore();
+  await runVenue(store, { name: "Depo", coordinates: { latitude: 44.8, longitude: 20.45 } }, "r1");
+  const u = await runVenue(store, { name: "Depo", coordinates: { latitude: 44.9, longitude: 20.5 } }, "r2");
+  assert.equal(u.changeStatus, "UPDATED");
+  const row = (await store.getVenueBySource("osm", "v-1"))!;
+  assert.deepEqual(row.coordinates, { latitude: 44.9, longitude: 20.5 });
+  assert.equal(row.coordinatesSource, "source");
+  const again = await runVenue(store, { name: "Depo", coordinates: { latitude: 44.9, longitude: 20.5 } }, "r3");
+  assert.equal(again.changeStatus, "UNCHANGED");
+});
+
+// ── source-omitted optional fields vs change detection ───────────────
+const OMITTABLE = ["description", "openingTime", "closingTime", "isActive"] as const;
+type VenueRec = Extract<NormalizedRecord, { kind: "venue" }>;
+
+/** The Depo record with the OPTIONAL fields left out entirely — as the OSM adapter emits it. */
+function depoOmitting(over: Partial<VenueRec["fields"]> = {}): NormalizedRecord {
+  const base = venueRecord({ sourceKey: "osm", externalId: "v-1", countryCode: "RS", cityText: "Belgrade", name: "Depo" }) as VenueRec;
+  const fields: Partial<VenueRec["fields"]> = { ...base.fields };
+  for (const k of OMITTABLE) delete fields[k];
+  return { ...base, fields: { ...(fields as VenueRec["fields"]), ...over } };
+}
+
+async function planRec(store: ReturnType<typeof seededStore>, rec: NormalizedRecord, runId: string) {
+  const adapter = createInMemoryAdapter({ key: "osm", items: [fakeItem(rec)] });
+  const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store, now: NOW, runId });
+  await store.apply(plan, { commit: true });
+  return plan.upserts.find((u) => u.kind === "venue")!;
+}
+
+/** A linked Depo whose curator then filled fields the source never provides. */
+async function curatedDepo() {
+  const store = seededStore();
+  await planRec(store, depoOmitting(), "r1");
+  const v = store.venues.find((x) => x.externalId === "v-1")!;
+  Object.assign(v, { description: "Legendary techno club", openingTime: "23:00", closingTime: "06:00", isActive: false });
+  return store;
+}
+
+test("[omitted-fields regression] fields the source does not provide never read as a change — UNCHANGED, curated values kept", async () => {
+  const store = await curatedDepo();
+  // Before the fix: UPDATED on this run and on every identical run after it.
+  assert.equal((await planRec(store, depoOmitting(), "r2")).changeStatus, "UNCHANGED");
+  assert.equal((await planRec(store, depoOmitting(), "r3")).changeStatus, "UNCHANGED");
+  const row = (await store.getVenueBySource("osm", "v-1"))!;
+  assert.equal(row.description, "Legendary techno club");
+  assert.equal(row.openingTime, "23:00");
+  assert.equal(row.closingTime, "06:00");
+  assert.equal(row.isActive, false);
+});
+
+test("[omitted-fields] a value the source DOES provide is still compared normally, one field at a time", async () => {
+  for (const [over, read, want] of [
+    [{ description: "Now with live music" }, (r: any) => r.description, "Now with live music"],
+    [{ openingTime: "22:00" }, (r: any) => r.openingTime, "22:00"],
+    [{ closingTime: "05:00" }, (r: any) => r.closingTime, "05:00"],
+    [{ isActive: true }, (r: any) => r.isActive, true],
+    [{ website: "https://depo.example" }, (r: any) => r.website, "https://depo.example"],
+  ] as const) {
+    const store = await curatedDepo();
+    assert.equal((await planRec(store, depoOmitting(over), "r2")).changeStatus, "UPDATED", JSON.stringify(over));
+    assert.equal(read((await store.getVenueBySource("osm", "v-1"))!), want, JSON.stringify(over));
+    assert.equal((await planRec(store, depoOmitting(over), "r3")).changeStatus, "UNCHANGED", JSON.stringify(over));
+  }
+});
+
+test("[omitted-fields] an EXPLICIT null is not 'omitted' — it is still compared (no blanket null policy)", async () => {
+  const store = await curatedDepo();
+  // The source asserts a value (null) that differs from the stored one: that is
+  // a difference, reported as such. (The store cannot persist a clear today.)
+  assert.equal((await planRec(store, depoOmitting({ description: null }), "r2")).changeStatus, "UPDATED");
+});
+
+// ── field presence: address / website / wikidata / openingHours ──────
+const PRESENCE = ["address", "website", "wikidata", "openingHours"] as const;
+
+/** Depo with EVERY optional field left out — as the OSM adapter emits a bare element. */
+function depoBare(over: Partial<VenueRec["fields"]> = {}): NormalizedRecord {
+  const base = venueRecord({ sourceKey: "osm", externalId: "v-1", countryCode: "RS", cityText: "Belgrade", name: "Depo" }) as VenueRec;
+  const fields: Partial<VenueRec["fields"]> = { ...base.fields };
+  for (const k of [...OMITTABLE, ...PRESENCE]) delete fields[k];
+  return { ...base, fields: { ...(fields as VenueRec["fields"]), ...over } };
+}
+
+const CURATED = { address: "Nova 1", website: "https://curated.example", wikidata: "Q1", openingHours: "Mo-Su 18:00-02:00" };
+
+async function curatedPresenceDepo() {
+  const store = seededStore();
+  await planRec(store, depoBare(), "r1");
+  Object.assign(store.venues.find((x) => x.externalId === "v-1")!, CURATED);
+  return store;
+}
+
+test("[presence regression] omitted address / website / wikidata / openingHours never read as a change — UNCHANGED twice, curated values kept", async () => {
+  const store = await curatedPresenceDepo();
+  // Before the fix: UPDATED on every run (the omitted fields compared as null).
+  assert.equal((await planRec(store, depoBare(), "r2")).changeStatus, "UNCHANGED");
+  assert.equal((await planRec(store, depoBare(), "r3")).changeStatus, "UNCHANGED");
+  const row = (await store.getVenueBySource("osm", "v-1"))!;
+  assert.deepEqual(Object.fromEntries(PRESENCE.map((k) => [k, row[k]])), CURATED);
+});
+
+test("[presence] a NEW venue with omitted fields persists them as null (never undefined) in the canonical row", async () => {
+  const store = seededStore();
+  await planRec(store, depoBare(), "r1");
+  const row = (await store.getVenueBySource("osm", "v-1"))!;
+  for (const k of [...PRESENCE, "description", "openingTime", "closingTime"] as const) {
+    assert.strictEqual(row[k], null, `${k} must be stored as null`);
+  }
+  assert.equal(row.isActive, true);
+});
+
+test("[presence] a PROVIDED value is compared normally: UPDATED, written, then UNCHANGED — one field at a time", async () => {
+  for (const k of PRESENCE) {
+    const store = await curatedPresenceDepo();
+    const over = { [k]: `new-${k}` };
+    assert.equal((await planRec(store, depoBare(over), "r2")).changeStatus, "UPDATED", k);
+    assert.equal((await store.getVenueBySource("osm", "v-1"))![k], `new-${k}`, k);
+    assert.equal((await planRec(store, depoBare(over), "r3")).changeStatus, "UNCHANGED", k);
+  }
+});
+
+test("[presence] an EXPLICIT null is still compared (reserved clear semantic — not treated as omitted)", async () => {
+  for (const k of PRESENCE) {
+    const store = await curatedPresenceDepo();
+    assert.equal((await planRec(store, depoBare({ [k]: null }), "r2")).changeStatus, "UPDATED", k);
+    assert.equal((await store.getVenueBySource("osm", "v-1"))![k], CURATED[k], `${k}: no clear is written`);
+  }
+});
+
+test("[presence][hash contract] comparable() never contains undefined, and converges with the persisted projection", () => {
+  // normalizedName as the engine fills it before persisting, so only presence differs
+  const rec = depoBare({ normalizedName: "depo" });
+  const incoming = comparable(rec);
+  for (const [k, v] of Object.entries(incoming)) assert.notStrictEqual(v, undefined, `comparable.${k} is undefined`);
+  for (const k of PRESENCE) assert.strictEqual(incoming[k], null, k);
+  // a row persisted from that record projects to the same hash
+  const store = seededStore();
+  return planRec(store, rec, "r1").then(async () => {
+    const row = (await store.getVenueBySource("osm", "v-1"))!;
+    assert.equal(hashComparable(venueComparable(row)), hashComparable(incoming));
+  });
+});
