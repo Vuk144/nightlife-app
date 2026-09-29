@@ -64,6 +64,14 @@ export const CROSS_SOURCE_VENUE_IDENTITIES: CrossSourceVenueIdentity[] = [
     canonical: { sourceKey: "OpenStreetMap", externalId: "node/12068261369" },
     note: 'GIGS TIX "Barrel house" (Žorža Klemansoa 19) is part of the OSM venue "Belgrade Urban Distillery" at the same address.',
   },
+  {
+    countryCode: "RS",
+    cityName: "Belgrade",
+    sourceKey: "gigstix",
+    externalId: "nova-zappa-barka",
+    canonical: { sourceKey: "OpenStreetMap", externalId: "way/1446216912" },
+    note: "GIGS TIX Nova Zappa Barka = the OSM venue Zappa Barka (same physical venue; confirmed by product owner).",
+  },
 ];
 
 export type CrossSourceIdentityResult =
