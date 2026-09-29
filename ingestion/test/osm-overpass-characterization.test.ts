@@ -136,7 +136,7 @@ area(id:3602728438)->.bg;
   nwr["craft"="brewery"]["microbrewery"="yes"](area.bg);
   nwr["craft"="brewery"]["taproom"="yes"](area.bg);
   nwr["craft"="brewery"]["amenity"~"^(bar|pub)$"](area.bg);
-  node(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303);
+  node(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303,4773685799);
   way(id:41234985,23671766,393274192,150590534,149635378,203161878);
 );
 out tags center;`.replace(/\r\n/g, "\n");
@@ -169,7 +169,7 @@ test("buildOverpassQuery: a target with rescue refs emits Layer C id clauses, NO
   // …but the id-based Layer C clauses ARE present (node then way, no relation):
   assert.match(
     q,
-    /\n  node\(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303\);\n/,
+    /\n  node\(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303,4773685799\);\n/,
   );
   assert.match(q, /\n  way\(id:41234985,23671766,393274192,150590534,149635378,203161878\);\n/);
   assert.doesNotMatch(q, /\n  relation\(id:/);

@@ -162,6 +162,14 @@ export const RESCUE_ENTRIES: RescueEntry[] = [
     excludedAmenityAllowed: "conference_centre",
     note: "Congress centre that hosts concerts (GIGS TIX venue `sava-centar`, e.g. event 25572). OSM way/203161878 amenity=conference_centre wikidata=Q1278216 website=savacentar.net addr Милентија Поповића 9 — hard-excluded as a conference_centre, so pinned with an explicit excludedAmenityAllowed (Recall Audit follow-up, 2026-09-27). The separate way/1384308588 'Плава дворана Сава центра' is a hall inside the complex, not this object.",
   },
+  {
+    countryId: "RS", cityName: "Belgrade",
+    name: "Dorćol Platz",
+    aliases: ["Dorćol Platz", "Dorcol Platz", "Dorćol plac", "Дорћол плац"],
+    category: "concert_hall",
+    osmRef: "node/4773685799",
+    note: "Multi-functional art space with concerts, gigs and festivals (official site dorcolplatz.rs; GIGS TIX venue `dorcol-platz`, e.g. event 26383, ~14 m from this node). OSM node/4773685799 amenity=arts_centre wikidata=Q87988668 website=dorcolplatz.rs addr Добрачина 59b — no music signal, so pinned by exact osmRef; generic arts_centre stays signal-gated (Recall Audit follow-up, Dorćol Platz investigation, 2026-09-29).",
+  },
 ];
 
 /**
