@@ -14,6 +14,7 @@ import { buildOverpassQuery, parseOverpassVenues } from "../src/sources/osm-over
 import { createOsmOverpassAdapter } from "../src/sync/adapters/osm-overpass.ts";
 import type { IngestionTarget } from "../src/targets.ts";
 import type { OverpassElement, OverpassResponse } from "../src/types.ts";
+import { matchingClauses } from "./overpass-ql-eval.ts";
 
 const BELGRADE: IngestionTarget = { countryId: "RS", cityName: "Belgrade", osmRelationId: 2728438 };
 const NOVI_SAD: IngestionTarget = { countryId: "RS", cityName: "Novi Sad", osmRelationId: 1373766 };
@@ -156,16 +157,17 @@ test("the Overpass query fetches node/4773685799 by exact id, although no Layer 
   // it appears exactly once, and only in the Layer C id clause
   assert.equal(q.split("4773685799").length - 1, 1);
   // arts_centre is only ever requested together with a signal filter: every
-  // clause naming arts_centre carries a second tag filter, and none of those
-  // signal keys is on the real node
+  // clause naming arts_centre carries a second tag filter, and — evaluated
+  // against the real tags — the ONLY clause that returns the node is its
+  // Layer C id clause (no Layer B signal or name clause matches it)
   const artsClauses = q.split("\n").filter((line) => line.includes("arts_centre"));
   assert.ok(artsClauses.length > 0);
   for (const line of artsClauses) {
-    const filters = line.match(/\["[^"]+"(?:[=~]"[^"]*")?\]/g) ?? [];
+    const filters = line.match(/\["[^"]+"(?:[=~]"[^"]*"(?:,i)?)?\]/g) ?? [];
     assert.equal(filters.length, 2, line);
-    const signalKey = /\["([^"]+)"/.exec(filters[1])?.[1] ?? "";
-    assert.equal(signalKey in DORCOL_TAGS, false, `${signalKey} would match the node`);
   }
+  const idClause = q.split("\n").find((l) => /^ {2}node\(id:/.test(l))!.trim();
+  assert.deepEqual(matchingClauses(q, { type: "node", id: 4773685799, tags: DORCOL_TAGS }), [idClause]);
   assert.doesNotMatch(q, /\["amenity"="arts_centre"\]\(area/, "no unconditional arts_centre clause");
 });
 

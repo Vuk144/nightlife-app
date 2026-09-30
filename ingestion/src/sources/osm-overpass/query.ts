@@ -2,6 +2,7 @@ import type { IngestionTarget } from "../../targets.ts";
 import {
   KAFANA_NAME_OVERPASS,
   LAYER_B_AMENITIES as LAYER_B_AMENITY_SET,
+  PERFORMANCE_NAME_OVERPASS,
   SHISHA_NAME_OVERPASS,
   SPLAV_NAME_OVERPASS,
 } from "../../classify.ts";
@@ -93,8 +94,13 @@ const LAYER_A_AMENITIES = [
   "karaoke_box",
 ] as const;
 
-/** `club=` values that always denote a nightlife venue. */
-const NIGHTLIFE_CLUB_VALUES = ["music", "nightlife", "social"] as const;
+/**
+ * `club=` values that always denote a nightlife venue — the classifier's Layer
+ * A (`classify.ts#CLUB_LAYER_A` + `club=nightlife`). `club=social` is NOT one of
+ * them: the classifier gates it on a signal (Layer B), so it is fetched as a
+ * Layer B base below.
+ */
+const NIGHTLIFE_CLUB_VALUES = ["music", "nightlife"] as const;
 
 /** `leisure=` values that always denote a dance / performance venue. */
 const NIGHTLIFE_LEISURE_VALUES = ["dance", "karaoke"] as const;
@@ -153,7 +159,14 @@ function regionalClauses(): string[] {
  */
 const LAYER_B_AMENITY_FILTER = amenityIn([...LAYER_B_AMENITY_SET]);
 
-/** Tag filters that count as a documented music / performance signal. */
+/**
+ * Tag filters for every strong / medium signal `classify.ts#nightlifeSignal`
+ * accepts on a Layer B base amenity — each one paired with the Layer B amenity
+ * gate. A signal the classifier accepts but this list omits is an object the
+ * classifier would accept that discovery never fetches (e.g. a "Comedy Club"
+ * name on a community_centre), so keep the two in step
+ * (`test/osm-overpass-alignment.test.ts`).
+ */
 const LAYER_B_SIGNAL_FILTERS: readonly string[] = [
   tagFilter({ key: "live_music" }),
   tagFilter({ key: "music", matches: "^(live|dj)$" }),
@@ -163,39 +176,39 @@ const LAYER_B_SIGNAL_FILTERS: readonly string[] = [
   tagFilter({ key: "dancefloor", eq: "yes" }),
   tagFilter({ key: "stage", eq: "yes" }),
   tagFilter({ key: "karaoke", eq: "yes" }),
+  tagFilter({ key: "dj", eq: "yes" }),
+  tagFilter({ key: "concerts", eq: "yes" }),
+  tagFilter({ key: "disco", eq: "yes" }),
+  tagFilter({ key: "nightclub", eq: "yes" }),
+  tagFilter({ key: "theatre:type", matches: "^(concert_hall|music|cabaret)$" }),
+  tagFilter({ key: "theatre:genre", matches: "^(comedy|cabaret|stand_up)$" }),
+  tagFilter({ key: "community_centre", matches: "^(music|arts|youth_centre)$" }),
+  tagFilter({ key: "microbrewery", eq: "yes" }),
+  tagFilter({ key: "brewery" }),
+  tagFilter({ key: "real_ale", eq: "yes" }),
+  tagFilter({ key: "name", matches: PERFORMANCE_NAME_OVERPASS, caseInsensitive: true }),
 ];
 
-/** Theatre / community-centre performance-signal clauses (self-contained filters). */
-const LAYER_B_CULTURAL_CLAUSES: readonly string[] = [
-  tagFilter({ key: "amenity", eq: "theatre" }) +
-    tagFilter({ key: "theatre:type", matches: "^(concert_hall|music|cabaret)$" }),
-  tagFilter({ key: "amenity", eq: "theatre" }) +
-    tagFilter({ key: "theatre:genre", matches: "^(comedy|cabaret|stand_up)$" }),
-  tagFilter({ key: "amenity", eq: "community_centre" }) +
-    tagFilter({ key: "community_centre", matches: "^(music|arts|youth_centre)$" }),
+/**
+ * Layer B bases that are not an amenity: `craft=brewery` and `club=social`.
+ * The classifier accepts them only with a signal, but a signal can be ANY of
+ * the above, and both sets are tiny, so each is fetched whole and gated
+ * post-fetch by `classifyOsmElement`.
+ */
+const LAYER_B_NON_AMENITY_BASES: readonly string[] = [
+  tagFilter({ key: "craft", eq: "brewery" }),
+  tagFilter({ key: "club", eq: "social" }),
 ];
 
-/** Amenities that can carry a brewery / real-ale signal. */
-const BREWERY_BASE_AMENITIES = ["restaurant", "cafe", "pub", "bar"] as const;
-
-/** `craft=brewery` places that are also a public bar / pub. */
-const BREWERY_TAPROOM_AMENITIES = ["bar", "pub"] as const;
-
-/** "Has a bar" + brewery / taproom clauses (self-contained filters). */
+/** "Has a bar" on a restaurant / cafe (medium on a restaurant; weak, re-checked, on a cafe). */
 const LAYER_B_DRINKS_CLAUSES: readonly string[] = [
   amenityIn(["restaurant", "cafe"]) + tagFilter({ key: "bar", eq: "yes" }),
-  amenityIn(BREWERY_BASE_AMENITIES) + tagFilter({ key: "microbrewery", eq: "yes" }),
-  amenityIn(BREWERY_BASE_AMENITIES) + tagFilter({ key: "brewery" }),
-  amenityIn(BREWERY_BASE_AMENITIES) + tagFilter({ key: "real_ale", eq: "yes" }),
-  tagFilter({ key: "craft", eq: "brewery" }) + tagFilter({ key: "microbrewery", eq: "yes" }),
-  tagFilter({ key: "craft", eq: "brewery" }) + tagFilter({ key: "taproom", eq: "yes" }),
-  tagFilter({ key: "craft", eq: "brewery" }) + amenityIn(BREWERY_TAPROOM_AMENITIES),
 ];
 
 function layerBClauses(): string[] {
   return [
     ...LAYER_B_SIGNAL_FILTERS.map((signal) => areaClause(LAYER_B_AMENITY_FILTER + signal)),
-    ...LAYER_B_CULTURAL_CLAUSES.map((filters) => areaClause(filters)),
+    ...LAYER_B_NON_AMENITY_BASES.map((filters) => areaClause(filters)),
     ...LAYER_B_DRINKS_CLAUSES.map((filters) => areaClause(filters)),
   ];
 }

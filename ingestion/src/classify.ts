@@ -191,8 +191,19 @@ const STRENGTH_RANK: Record<SignalStrength, number> = {
   none: 0, weak: 1, medium: 2, strong: 3,
 };
 
-const NAME_PERFORMANCE_REGEX =
-  /\b(jazz club|blues club|music club|live music|open mic|comedy club|stand[- ]?up|kabare|cabaret|koncert|nastup)\b/i;
+/**
+ * Name fragments that indicate a music / performance venue (a medium Layer B
+ * signal). Regex fragments, not literals (`stand[- ]?up`). The classifier
+ * wraps them in word boundaries; the Overpass query uses the same alternation
+ * (without `\b`, which Overpass does not support — a superset the classifier
+ * then re-checks), so discovery and classification share one vocabulary.
+ */
+const PERFORMANCE_NAME_TERMS = [
+  "jazz club", "blues club", "music club", "live music", "open mic",
+  "comedy club", "stand[- ]?up", "kabare", "cabaret", "koncert", "nastup",
+];
+export const PERFORMANCE_NAME_OVERPASS = PERFORMANCE_NAME_TERMS.join("|");
+const NAME_PERFORMANCE_REGEX = new RegExp(`\\b(${PERFORMANCE_NAME_TERMS.join("|")})\\b`, "i");
 
 /**
  * The strongest documented nightlife / music / performance signal on an
