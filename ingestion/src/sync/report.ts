@@ -17,6 +17,11 @@ export function formatSyncPlan(plan: SyncPlan): string {
     `  scope: countries=${plan.run.scope.countries.join(",") || "(all)"} ` +
       `cities=${plan.run.scope.cities.join(",") || "(all)"}`,
   );
+  out.push(
+    (plan.run.completeness ?? "complete") === "partial"
+      ? "  run: PARTIAL — stored records not seen in this run are not reconciled"
+      : "  run: COMPLETE",
+  );
   out.push(`  status: ${s.status.toUpperCase()}  healthy=${s.healthy}  (${s.durationMs}ms)`);
   out.push("");
   out.push("  discovery/fetch/parse");

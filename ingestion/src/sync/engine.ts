@@ -19,6 +19,11 @@ import { profileFor } from "./normalization.ts";
 import { planReconciliation } from "./reconcile.ts";
 import { comparable, type CanonicalStore, type SourceLink } from "./store.ts";
 import { toInstantMs } from "./time-zone.ts";
+import {
+  resolveCrossSourceIdentity,
+  type CrossSourceIdentityResult,
+  type CrossSourceVenueIdentity,
+} from "./venue-cross-source-identity.ts";
 import { resolveVenueIdentity, type VenueMatchCandidate } from "./venue-identity.ts";
 import { validateRecord } from "./validation.ts";
 import type {
@@ -29,12 +34,14 @@ import type {
   NormalizedRecord,
   ResolvedScope,
   ReviewItem,
+  RunCompleteness,
   SourceAdapter,
   SourceStateSnapshot,
   StoredRecordState,
   SyncPlan,
   SyncRunStats,
   ValidationResult,
+  VenueFields,
 } from "./types.ts";
 
 const ZERO_CHANGE_COUNTS: Record<ChangeStatus, number> = {
@@ -56,6 +63,21 @@ export interface PlanSyncInput {
   now: string;
   runId: string;
   limit?: number;
+  /**
+   * `"complete"` (default): the run sees the source's whole current record
+   * set, so a stored record it did not see progresses through reconciliation.
+   * `"partial"`: the run covers only part of the source (e.g. one event), so
+   * only records it SAW take part in reconciliation — nothing else is touched.
+   * A `limit` that cuts discovery short always makes the run partial.
+   */
+  completeness?: RunCompleteness;
+  /**
+   * Curated cross-source venue identities, checked for an event's venue hint
+   * before the name tiers — same rule as `./event-venue-match.ts` (see
+   * `./venue-cross-source-identity.ts`). Pass `CROSS_SOURCE_VENUE_IDENTITIES`;
+   * omitted = none.
+   */
+  crossSourceIdentities?: CrossSourceVenueIdentity[];
 }
 
 export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
@@ -91,6 +113,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   const seenKeys = new Set<string>();
   const linkedVenueCache = new Map<string, NormalizedRecord | null>();
   const eventFirstCandidateKeys = new Set<string>();
+  const claimedVenueIds = new Set<string>();
 
   const primaryCountry =
     config.country(source.scope.countries[0] ?? null) ??
@@ -108,10 +131,15 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
 
   // ── discover ──────────────────────────────────────────────────────
   const refs = [];
+  let completeness: RunCompleteness = input.completeness ?? "complete";
   try {
     for await (const ref of adapter.discover(adapterCtx)) {
       refs.push(ref);
-      if (adapterCtx.limit > 0 && refs.length >= adapterCtx.limit) break;
+      if (adapterCtx.limit > 0 && refs.length >= adapterCtx.limit) {
+        // the source may hold more than we took — never reconcile as if complete
+        completeness = "partial";
+        break;
+      }
     }
   } catch (error) {
     stats.status = "failed";
@@ -122,7 +150,7 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
       runStatus: "failed",
       actions: [],
       skippedReason: "discovery failed",
-    }, input, startedAtMs);
+    }, input, startedAtMs, completeness);
   }
   stats.discovered = refs.length;
 
@@ -152,10 +180,14 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
     }
     if (!parsed.ok) {
       stats.parseFailed++;
+      stats.notes.push(
+        `parse failed (${ref.externalId ?? ref.url}): ${parsed.reason}${parsed.detail ? ` — ${parsed.detail}` : ""}`,
+      );
       continue;
     }
     stats.parsed++;
 
+    const reservedVenueIds = await reserveOwnedVenues(store, parsed.records);
     for (const record of parsed.records) {
       await processRecord(record, {
         adapter,
@@ -169,6 +201,9 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
         seenKeys,
         linkedVenueCache,
         eventFirstCandidateKeys,
+        claimedVenueIds,
+        reservedVenueIds,
+        crossSourceIdentities: input.crossSourceIdentities ?? [],
       });
     }
   }
@@ -191,7 +226,21 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   }
 
   // ── reconciliation ───────────────────────────────────────────────
-  const snapshots = await buildSnapshots(store, source, now);
+  const allSnapshots = await buildSnapshots(store, source, now);
+  // A partial run speaks only for the records it saw: a stored record outside
+  // the run is not "missing", so it takes no part in reconciliation at all.
+  const snapshots =
+    completeness === "partial" ? allSnapshots.filter((s) => seenKeys.has(s.key)) : allSnapshots;
+  if (snapshots.length < allSnapshots.length) {
+    stats.notes.push(
+      `partial run: ${allSnapshots.length - snapshots.length} stored record(s) not seen in this run were not reconciled`,
+    );
+  }
+  // The snapshot guards judge a COMPLETE snapshot (a missing partition, a
+  // collapse); a partial run is small by design and reconciles nothing unseen.
+  if (adapter.capabilities.snapshotRefs && completeness === "complete") {
+    guardSnapshotRun(stats, snapshots, seenKeys, cfg.reconciliation.minDiscoveryRatio);
+  }
   const reconciliation = planReconciliation({
     runStatus: stats.status,
     healthy: stats.healthy,
@@ -209,8 +258,61 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
     if (a.transition === "mark-gone") stats.byChangeStatus.GONE++;
   }
 
-  return finish(stats, upserts, reviewItems, reconciliation, input, startedAtMs);
+  return finish(stats, upserts, reviewItems, reconciliation, input, startedAtMs, completeness);
 }
+
+/**
+ * Extra health rules for a source whose refs are complete snapshots
+ * (`SourceCapabilities.snapshotRefs`). The generic ratio rules above allow a
+ * few failed pages; for a snapshot source one failed or empty ref is a whole
+ * partition (e.g. a city) that would read as "all its records disappeared",
+ * and a result far smaller than what was synced before is a collapse, not a
+ * mass closure. Either makes the run unhealthy, so reconciliation is skipped.
+ */
+function guardSnapshotRun(
+  stats: SyncRunStats,
+  snapshots: SourceStateSnapshot[],
+  seenKeys: Set<string>,
+  minDiscoveryRatio: number,
+): void {
+  const unhealthy = (note: string) => {
+    stats.status = stats.status === "failed" ? "failed" : "degraded";
+    stats.healthy = false;
+    stats.notes.push(note);
+  };
+  const failedRefs = stats.fetchFailed + stats.parseFailed;
+  if (failedRefs > 0) {
+    unhealthy(
+      `snapshot source: ${failedRefs} of ${stats.discovered} refs failed or were empty — ` +
+        `a whole partition is missing, reconciliation skipped`,
+    );
+  }
+  // Baseline: stored records reconciliation could still act on.
+  const baseline = snapshots.filter((s) => !s.frozen && !s.cancelled && s.sourceStatus !== "gone");
+  const seen = baseline.filter((s) => seenKeys.has(s.key)).length;
+  if (baseline.length > 0 && seen / baseline.length < minDiscoveryRatio) {
+    unhealthy(
+      `collapsed result: only ${seen} of ${baseline.length} previously synced records seen ` +
+        `(< minDiscoveryRatio ${minDiscoveryRatio}) — reconciliation skipped`,
+    );
+  }
+}
+
+/**
+ * The OPTIONAL members of `VenueFields` — the venue fields where the model
+ * separates "source does not provide this" (`undefined`) from an explicit value.
+ * Each name is also its `comparable()` key.
+ */
+const OPTIONAL_VENUE_FIELDS = [
+  "address",
+  "website",
+  "wikidata",
+  "openingHours",
+  "description",
+  "openingTime",
+  "closingTime",
+  "isActive",
+] as const satisfies readonly (keyof VenueFields)[];
 
 // ── one record through the pipeline ────────────────────────────────
 interface ProcessCtx {
@@ -224,6 +326,8 @@ interface ProcessCtx {
   reviewItems: ReviewItem[];
   seenKeys: Set<string>;
   linkedVenueCache: Map<string, NormalizedRecord | null>;
+  /** `PlanSyncInput.crossSourceIdentities` ([] when omitted). */
+  crossSourceIdentities: CrossSourceVenueIdentity[];
   /**
    * `sourceKey:externalId` of every event-first venue candidate already
    * decided this run. Several events at the same unknown venue name ONE
@@ -231,6 +335,33 @@ interface ProcessCtx {
    * `venuesNew`) or its own identical review item.
    */
   eventFirstCandidateKeys: Set<string>;
+  /**
+   * Existing venue ids already linked by a venue record earlier in this run.
+   * One canonical venue is one real place: a later record matching it must
+   * not link it too (the matcher's `consumed` set, shared for the whole run).
+   */
+  claimedVenueIds: Set<string>;
+  /**
+   * For the current parsed batch: existing venue id → the external id that
+   * already owns it by exact source identity. The owner always gets its own
+   * row, even when a weaker (e.g. same-name) match from another record in the
+   * batch is processed first.
+   */
+  reservedVenueIds: Map<string, string>;
+}
+
+/** Existing venues owned (by exact source identity) by a venue record in `records`. */
+async function reserveOwnedVenues(
+  store: CanonicalStore,
+  records: NormalizedRecord[],
+): Promise<Map<string, string>> {
+  const reserved = new Map<string, string>();
+  for (const r of records) {
+    if (r.kind !== "venue") continue;
+    const owned = await store.getVenueBySource(r.provenance.sourceKey, r.provenance.externalId);
+    if (owned) reserved.set(owned.id, r.provenance.externalId);
+  }
+  return reserved;
 }
 
 async function processRecord(input: NormalizedRecord, ctx: ProcessCtx): Promise<void> {
@@ -277,7 +408,7 @@ async function processVenue(
   record2: Extract<NormalizedRecord, { kind: "venue" }>,
   scope: ResolvedScope,
   validation: ValidationResult,
-  _normalize: (s: string) => string,
+  normalize: (s: string) => string,
   ctx: ProcessCtx,
 ): Promise<void> {
   const { store, now, stats } = ctx;
@@ -292,19 +423,27 @@ async function processVenue(
     note: "scope unresolved",
   };
   if (scope.cityId && scope.cityName && scope.countryCode) {
-    const existing = (await store.listVenuesInCity(scope.cityId)).map(toVenueMatchCandidate);
+    const existing = (await store.listVenuesInCity(scope.cityId)).map((v) =>
+      toVenueMatchCandidate(v, normalize),
+    );
+    const blocked = new Set(ctx.claimedVenueIds);
+    for (const [id, owner] of ctx.reservedVenueIds) {
+      if (owner !== record2.provenance.externalId) blocked.add(id);
+    }
     identity = resolveVenueIdentity({
       incoming: {
         source: record2.provenance,
         name: record2.fields.name,
         normalizedName,
         coordinates: record2.fields.coordinates,
-        address: record2.fields.address,
-        website: record2.fields.website,
-        wikidata: record2.fields.wikidata,
+        // omitted and null are the same thing to the matcher
+        address: record2.fields.address ?? null,
+        website: record2.fields.website ?? null,
+        wikidata: record2.fields.wikidata ?? null,
       },
       scope: { countryCode: scope.countryCode, cityName: scope.cityName },
       existingInCity: existing,
+      consumed: blocked,
     });
   }
 
@@ -314,6 +453,26 @@ async function processVenue(
     record2.provenance.externalId,
   );
   const venueComparable = comparable(record2);
+  // Manual coordinates are never overwritten by a source (both stores enforce
+  // it on write), so the source's coordinates can never be persisted there.
+  // Compare what WOULD be persisted: the stored pin. Otherwise the difference
+  // alone reads as UPDATED on every run. Every other field still compares.
+  if (storedLink) {
+    const current = await store.getVenueById(storedLink.canonicalId);
+    if (current?.coordinatesSource === "manual") {
+      venueComparable.lat = current.coordinates?.latitude ?? null;
+      venueComparable.lon = current.coordinates?.longitude ?? null;
+    }
+    // Same rule for an OPTIONAL field the source does not provide at all
+    // (`undefined`, e.g. OSM has no description / opening times): nothing is
+    // written, so the stored value stands. An explicit `null` is a value the
+    // source asserted and still compares.
+    for (const key of OPTIONAL_VENUE_FIELDS) {
+      if (record2.fields[key] === undefined) {
+        venueComparable[key] = storedLink.comparableFields[key] ?? null;
+      }
+    }
+  }
   const change = detectChange({
     // The hash is over the canonical comparable fields — not the adapter's raw
     // hash — so any store can reconstruct the same value from a persisted row.
@@ -343,6 +502,9 @@ async function processVenue(
   );
   if (identity.decision === "matched") stats.venuesMatched++;
   else if (operation === "insert") stats.venuesNew++;
+  // Only a record that actually gets an upsert claims its venue — a rejected
+  // or held record above never blocks a later valid one.
+  if (operation !== "insert" && canonicalId) ctx.claimedVenueIds.add(canonicalId);
 
   ctx.upserts.push({
     kind: "venue",
@@ -377,7 +539,33 @@ async function processEvent(
   let venueIdentity: IdentityOutcome | null = null;
   const hint = record.links.venue;
 
-  if (hint && scope.cityId && scope.cityName && scope.countryCode) {
+  // The source's own venue id first: a curated cross-source identity (or a
+  // conflict around that id) is authoritative over any name — the same rule
+  // as `./event-venue-match.ts#matchEventVenue`.
+  const crossSource = await eventVenueSourceIdentity(record, scope, ctx);
+  if (crossSource.status === "matched") {
+    resolvedVenueId = crossSource.venueId;
+    venueIdentity = {
+      entity: "venue",
+      decision: "matched",
+      tier: 0,
+      canonicalId: crossSource.venueId,
+      reasonCode: "venue-source-identity",
+      note: crossSource.note,
+    };
+    stats.venuesMatched++;
+  } else if (crossSource.status === "review") {
+    ctx.reviewItems.push({
+      kind: "venue",
+      reasonCode: crossSource.reasonCode,
+      reasons: [crossSource.note],
+      record: { ...record },
+      suggestedCanonicalId: crossSource.candidates[0]?.id ?? null,
+    });
+    stats.reviewItems++;
+  }
+
+  if (crossSource.status === "none" && hint && scope.cityId && scope.cityName && scope.countryCode) {
     let venueName = hint.name;
     let coordinates = hint.coordinates;
     let address = hint.address;
@@ -398,13 +586,15 @@ async function processEvent(
         venueName = linked.fields.name?.trim() ? linked.fields.name : venueName;
         coordinates = linked.fields.coordinates ?? coordinates;
         address = linked.fields.address ?? address;
-        website = linked.fields.website;
-        wikidata = linked.fields.wikidata;
+        website = linked.fields.website ?? null;
+        wikidata = linked.fields.wikidata ?? null;
         venueExternalId = linked.provenance.externalId || venueExternalId;
       }
     }
 
-    const existing = (await store.listVenuesInCity(scope.cityId)).map(toVenueMatchCandidate);
+    const existing = (await store.listVenuesInCity(scope.cityId)).map((v) =>
+      toVenueMatchCandidate(v, normalize),
+    );
     venueIdentity = resolveVenueIdentity({
       incoming: {
         source: { sourceKey: p.sourceKey, externalId: venueExternalId, sourceUrl: null },
@@ -576,6 +766,24 @@ async function processEvent(
 }
 
 // ── helpers ───────────────────────────────────────────────────────
+/** `resolveCrossSourceIdentity` for an event's venue hint; `none` when there are no curated identities. */
+async function eventVenueSourceIdentity(
+  record: Extract<NormalizedRecord, { kind: "event" }>,
+  scope: ResolvedScope,
+  ctx: ProcessCtx,
+): Promise<CrossSourceIdentityResult> {
+  const hint = record.links.venue;
+  if (!hint?.sourceVenueId || ctx.crossSourceIdentities.length === 0) return { status: "none" };
+  if (!scope.cityId || !scope.cityName || !scope.countryCode) return { status: "none" };
+  return resolveCrossSourceIdentity({
+    sourceKey: record.provenance.sourceKey,
+    externalId: hint.sourceVenueId,
+    city: { countryCode: scope.countryCode, cityName: scope.cityName },
+    identities: ctx.crossSourceIdentities,
+    venues: await ctx.store.listVenuesInCity(scope.cityId),
+  });
+}
+
 function decideOperation(
   status: ChangeStatus,
   identity: IdentityOutcome,
@@ -592,11 +800,17 @@ function decideOperation(
   return { operation: "skip", canonicalId };
 }
 
-function toVenueMatchCandidate(v: import("./store.ts").CanonicalVenue): VenueMatchCandidate {
+function toVenueMatchCandidate(
+  v: import("./store.ts").CanonicalVenue,
+  normalize: (s: string) => string,
+): VenueMatchCandidate {
   return {
     id: v.id,
     name: v.name,
-    normalizedName: v.normalizedName,
+    // A row whose stored name_normalized is NULL (read as "", e.g. a hand-seeded
+    // venue) would never match by name. Derive it in memory with the country's
+    // profile — nothing is written here; an explicit UPDATE writes it.
+    normalizedName: v.normalizedName || normalize(v.name),
     sourceKey: v.sourceKey,
     externalId: v.externalId,
     sourceUrl: v.sourceUrl,
@@ -670,6 +884,7 @@ function finish(
   reconciliation: SyncPlan["reconciliation"],
   input: PlanSyncInput,
   startedAtMs: number,
+  completeness: RunCompleteness,
 ): SyncPlan {
   stats.durationMs = Math.max(0, Date.now() - startedAtMs);
   return {
@@ -682,6 +897,7 @@ function finish(
         countries: input.source.scope.countries,
         cities: input.source.scope.cities,
       },
+      completeness,
     },
     upserts,
     reconciliation,

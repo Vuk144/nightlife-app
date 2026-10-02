@@ -442,3 +442,52 @@ test("[H11] the linked venue page's data is what gets validated; a blank linked 
   assert.equal(inserted.length, 1);
   assert.equal(inserted[0].record.kind === "venue" && inserted[0].record.fields.name, "Blank Page Club");
 });
+
+// ════════════════════════════════════════════════════════════════════
+//  H12 — per-run venue claims (OSM gap A) stay scoped to venue records
+// ════════════════════════════════════════════════════════════════════
+
+test("[H12] claims never leak into the event path: two events at one existing venue both link it", async () => {
+  const adapter = createInMemoryAdapter({
+    key: "entrio-hr",
+    items: ["E1", "E2"].map((id) =>
+      fakeItem(eventRecord({ sourceKey: "entrio-hr", externalId: id, countryCode: "HR", cityText: "Zagreb", title: `Night ${id}`, startLocal: "2026-08-01T22:00", venueName: "Tvornica" })),
+    ),
+  });
+  const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+  const events = plan.upserts.filter((u) => u.kind === "event");
+  assert.deepEqual(events.map((u) => u.kind === "event" && u.resolvedVenueId), ["v-zg-tvornica", "v-zg-tvornica"]);
+});
+
+test("[H12] a rejected venue record claims nothing — a later valid record still links the existing venue", async () => {
+  const adapter = createInMemoryAdapter({
+    key: "osm",
+    items: venueItems([
+      // matches v-zg-tvornica by name, but its coordinates are impossible → rejected
+      { sourceKey: "osm", externalId: "bad", countryCode: "HR", cityText: "Zagreb", name: "Tvornica", coordinates: { latitude: 999, longitude: 16 } },
+      { sourceKey: "osm", externalId: "good", countryCode: "HR", cityText: "Zagreb", name: "Tvornica" },
+    ]),
+  });
+  const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+  assert.deepEqual(plan.reviewItems.map((r) => [r.record.provenance.externalId, r.reasonCode]), [["bad", "invalid-coordinates"]]);
+  const good = plan.upserts.find((u) => u.record.provenance.externalId === "good");
+  assert.equal(good?.canonicalId, "v-zg-tvornica");
+});
+
+test("[H13 presence] an event-first candidate from a linked venue page that OMITS website / wikidata gets null, as before", async () => {
+  const page = venueRecord({ sourceKey: "entrio-hr", externalId: "p-1", countryCode: "HR", cityText: "Zagreb", name: "Novi Klub" });
+  if (page.kind !== "venue") throw new Error("fixture");
+  const fields = { ...page.fields };
+  delete fields.website;
+  delete fields.wikidata;
+  const adapter = createInMemoryAdapter({
+    key: "entrio-hr",
+    items: [fakeItem(eventRecord({ sourceKey: "entrio-hr", externalId: "E1", countryCode: "HR", cityText: "Zagreb", title: "Night", startLocal: "2026-08-01T22:00", venueName: "Novi Klub", sourceVenueId: "p-1" }))],
+    venuePages: [venuePage("p-1", { ...page, fields })],
+  });
+  const plan = await planSync({ adapter, source: src("entrio-hr"), config: cfg(), store: seededStore(), now: NOW, runId: "r1" });
+  const venue = plan.upserts.find((u) => u.kind === "venue");
+  assert.equal(venue?.operation, "insert");
+  assert.strictEqual(venue?.record.kind === "venue" && venue.record.fields.website, null);
+  assert.strictEqual(venue?.record.kind === "venue" && venue.record.fields.wikidata, null);
+});

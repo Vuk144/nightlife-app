@@ -34,7 +34,9 @@ test("buildOverpassQuery: scopes to the area, whitelisted values only", () => {
   assert.match(q, /"amenity"="biergarten"/);
   assert.match(q, /"amenity"="music_venue"/);
   assert.match(q, /"amenity"="karaoke_box"/);
-  assert.match(q, /"club"~"\^\(music\|nightlife\|social\)\$"/);
+  assert.match(q, /"club"~"\^\(music\|nightlife\)\$"/);
+  // club=social is a Layer B base (the classifier gates it on a signal), fetched whole
+  assert.match(q, /\["club"="social"\]\(area\.bg\)/);
 
   // regional name layers
   assert.match(q, /"name"~"[^"]*kafana[^"]*",i/);

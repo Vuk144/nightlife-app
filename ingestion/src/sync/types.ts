@@ -106,14 +106,20 @@ export interface VenueFields {
   name: string;
   /** Produced by the country's normalization profile (see `./normalization.ts`). */
   normalizedName: string;
-  address: string | null;
   coordinates: GeoPoint | null;
   coordinatesSource: "source" | "geocoded" | "manual" | null;
-  website: string | null;
-  wikidata: string | null;
+  // ── optional fields: presence is meaningful ──
+  //   undefined (key absent) — the source does not provide it: the stored value
+  //                            stands, and change detection compares the stored value;
+  //   null                   — an explicit empty / clear assertion (reserved: no
+  //                            store writes a clear yet, so an adapter should omit
+  //                            rather than send null);
+  //   a value                — provided: compared and written normally.
+  address?: string | null;
+  website?: string | null;
+  wikidata?: string | null;
   /** Raw opening-hours string (e.g. OSM syntax) — maps to `venues.opening_hours`. */
-  openingHours: string | null;
-  // ── optional, map onto existing `venues` columns when a source supplies them ──
+  openingHours?: string | null;
   /** Free-text description — `venues.description`. */
   description?: string | null;
   /** Structured local open time "HH:MM" — `venues.opening_time`. */
@@ -189,6 +195,13 @@ export interface SourceCapabilities {
   givesVenuePages: boolean;
   /** The source explicitly reports cancellations (so we may act on them). */
   emitsCancellations: boolean;
+  /**
+   * Each discovered ref returns the COMPLETE current set of the source's
+   * records for one partition (e.g. one OSM city area query) — not one record
+   * per page. A failed, empty or collapsed ref then means a whole partition is
+   * missing, so the engine must not reconcile (see `planSync`). Omitted = false.
+   */
+  snapshotRefs?: boolean;
 }
 
 export interface AdapterContext {
@@ -394,12 +407,21 @@ export interface ReviewItem {
   suggestedCanonicalId: string | null;
 }
 
+/**
+ * Does a run cover the source's COMPLETE current record set, or only part of
+ * it (one event, a hand-picked batch, a `limit`-truncated discovery)? Only a
+ * complete run may reconcile stored records it did not see.
+ */
+export type RunCompleteness = "complete" | "partial";
+
 export interface SyncRunContext {
   runId: string;
   sourceKey: string;
   startedAt: string;
   mode: "plan" | "apply";
   scope: { countries: string[]; cities: string[] };
+  /** Always set by `planSync`; absent (a hand-built plan) reads as "complete". */
+  completeness?: RunCompleteness;
 }
 
 export interface SyncRunStats {

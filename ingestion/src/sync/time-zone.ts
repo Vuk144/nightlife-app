@@ -85,6 +85,17 @@ export function localToInstant(local: string, timeZone: string): string | null {
   return new Date(guess).toISOString();
 }
 
+/**
+ * UTC instant (ms) → the local wall-clock `"YYYY-MM-DDTHH:MM"` in `timeZone`.
+ * The inverse of `localToInstant`; round-tripping through both detects a
+ * local time that does not exist in the zone (a DST spring-forward gap).
+ * Throws `RangeError` for an unknown time zone, like `Intl`.
+ */
+export function instantToLocal(instant: number, timeZone: string): string {
+  const offset = zoneOffsetMinutes(instant, timeZone);
+  return new Date(instant + offset * 60000).toISOString().slice(0, 16);
+}
+
 /** `"04:00"` / `"04:00:00"` → `"04:00"`. Null-safe. */
 export function normalizeTimeOfDay(value: string | null | undefined): string | null {
   if (!value) return null;

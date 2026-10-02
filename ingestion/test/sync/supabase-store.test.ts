@@ -1102,3 +1102,160 @@ test("[provenance] source_url changing does NOT change the synthesized link's co
   assert.equal(link2.sourceUrl, "https://b.example/e", "provenance URL followed the source");
   assert.equal(link2.contentHash, h1, "contentHash is unaffected by source_url");
 });
+
+test("[manual-coords regression] an identical re-sync of a manual-pinned venue is UNCHANGED; a real field change is still UPDATED (Supabase)", async () => {
+  const fake = new FakeSupabase();
+  seedGeography(fake);
+  fake.seed("data_sources", [{ id: "ds-t", name: "sync-test", type: "api" }]);
+  fake.seed("venues", [
+    {
+      id: "v-pin",
+      city_id: CITY_IDS.Zagreb,
+      name: "Depo",
+      name_normalized: "depo",
+      is_active: true,
+      latitude: 45.79001,
+      longitude: 15.95002,
+      coordinates_source: "manual",
+      source_id: "ds-t",
+      external_id: "v-1",
+      created_at: NOW,
+      updated_at: NOW,
+    },
+  ]);
+  const s = store(fake);
+  const run = async (over: Record<string, unknown>, runId: string) => {
+    const adapter = createInMemoryAdapter({
+      key: "sync-test",
+      items: [fakeItem(venueFieldRecord({ name: "Depo", coordinates: { latitude: 45.5, longitude: 16.5 }, ...over }))],
+    });
+    const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store: s, now: NOW, runId });
+    await s.apply(plan, { commit: true });
+    return plan.upserts.find((u) => u.kind === "venue")!;
+  };
+
+  // Before the fix: UPDATED on every run — the pin was compared against the source's coords.
+  assert.equal((await run({}, "r1")).changeStatus, "UNCHANGED");
+  assert.equal((await run({ website: "https://depo.example" }, "r2")).changeStatus, "UPDATED");
+  assert.equal((await run({ website: "https://depo.example" }, "r3")).changeStatus, "UNCHANGED");
+  const row = fake.tables.venues[0];
+  assert.equal(row.latitude, 45.79001, "manual latitude untouched");
+  assert.equal(row.longitude, 15.95002);
+  assert.equal(row.coordinates_source, "manual");
+  assert.equal(row.website, "https://depo.example");
+});
+
+test("[omitted-fields regression] fields the source does not provide never read as a change; provided ones still do (Supabase)", async () => {
+  const fake = new FakeSupabase();
+  seedGeography(fake);
+  fake.seed("data_sources", [{ id: "ds-t", name: "sync-test", type: "api" }]);
+  fake.seed("venues", [
+    {
+      id: "v-cur",
+      city_id: CITY_IDS.Zagreb,
+      name: "Depo",
+      name_normalized: "depo",
+      description: "Legendary techno club",
+      opening_time: "23:00:00",
+      closing_time: "06:00:00",
+      is_active: false,
+      source_id: "ds-t",
+      external_id: "v-1",
+      created_at: NOW,
+      updated_at: NOW,
+    },
+  ]);
+  const s = store(fake);
+  const omitting = (over: Record<string, unknown>) => {
+    const rec = venueFieldRecord({ name: "Depo", ...over }) as Extract<NormalizedRecord, { kind: "venue" }>;
+    const fields = { ...rec.fields };
+    for (const k of ["description", "openingTime", "closingTime", "isActive"] as const) if (!(k in over)) delete fields[k];
+    return { ...rec, fields } satisfies NormalizedRecord;
+  };
+  const run = async (over: Record<string, unknown>, runId: string) => {
+    const adapter = createInMemoryAdapter({ key: "sync-test", items: [fakeItem(omitting(over))] });
+    const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store: s, now: NOW, runId });
+    await s.apply(plan, { commit: true });
+    return plan.upserts.find((u) => u.kind === "venue")!;
+  };
+
+  // Before the fix: UPDATED on every run.
+  assert.equal((await run({}, "r1")).changeStatus, "UNCHANGED");
+  assert.equal((await run({}, "r2")).changeStatus, "UNCHANGED");
+  assert.equal((await run({ description: "Now with live music" }, "r3")).changeStatus, "UPDATED");
+  assert.equal((await run({ description: "Now with live music" }, "r4")).changeStatus, "UNCHANGED");
+  const row = fake.tables.venues[0];
+  assert.equal(row.description, "Now with live music");
+  assert.equal(row.opening_time, "23:00:00", "never written — the source does not provide it");
+  assert.equal(row.closing_time, "06:00:00");
+  assert.equal(row.is_active, false, "the curated deactivation is kept");
+});
+
+test("[presence regression] omitted address / website / wikidata / openingHours converge; curated values survive; provided ones still update (Supabase)", async () => {
+  const fake = new FakeSupabase();
+  seedGeography(fake);
+  fake.seed("data_sources", [{ id: "ds-t", name: "sync-test", type: "api" }]);
+  fake.seed("venues", [
+    {
+      id: "v-cur",
+      city_id: CITY_IDS.Zagreb,
+      name: "Depo",
+      name_normalized: "depo",
+      address: "Nova 1",
+      website: "https://curated.example",
+      wikidata: "Q1",
+      opening_hours: "Mo-Su 18:00-02:00",
+      is_active: true,
+      source_id: "ds-t",
+      external_id: "v-1",
+      created_at: NOW,
+      updated_at: NOW,
+    },
+  ]);
+  const s = store(fake);
+  const bare = (over: Record<string, unknown>) => {
+    const rec = venueFieldRecord({ name: "Depo", ...over }) as Extract<NormalizedRecord, { kind: "venue" }>;
+    const fields = { ...rec.fields };
+    for (const k of ["address", "website", "wikidata", "openingHours", "description", "openingTime", "closingTime", "isActive"] as const) {
+      if (!(k in over)) delete fields[k];
+    }
+    return { ...rec, fields } satisfies NormalizedRecord;
+  };
+  const run = async (over: Record<string, unknown>, runId: string) => {
+    const adapter = createInMemoryAdapter({ key: "sync-test", items: [fakeItem(bare(over))] });
+    const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store: s, now: NOW, runId });
+    await s.apply(plan, { commit: true });
+    return plan.upserts.find((u) => u.kind === "venue")!;
+  };
+
+  // Before the fix: UPDATED on every run.
+  assert.equal((await run({}, "r1")).changeStatus, "UNCHANGED");
+  assert.equal((await run({}, "r2")).changeStatus, "UNCHANGED");
+  const row = fake.tables.venues[0];
+  assert.deepEqual(
+    [row.address, row.website, row.wikidata, row.opening_hours],
+    ["Nova 1", "https://curated.example", "Q1", "Mo-Su 18:00-02:00"],
+  );
+  assert.equal((await run({ website: "https://new.example" }, "r3")).changeStatus, "UPDATED");
+  assert.equal((await run({ website: "https://new.example" }, "r4")).changeStatus, "UNCHANGED");
+  assert.equal(fake.tables.venues[0].website, "https://new.example");
+  assert.equal(fake.tables.venues[0].address, "Nova 1", "an omitted field is never written");
+});
+
+test("[presence] a NEW venue with omitted fields is inserted with null columns, not undefined (Supabase)", async () => {
+  const fake = new FakeSupabase();
+  seedGeography(fake);
+  const s = store(fake);
+  const rec = venueFieldRecord({ name: "Depo" }) as Extract<NormalizedRecord, { kind: "venue" }>;
+  const fields = { ...rec.fields };
+  for (const k of ["address", "website", "wikidata", "openingHours"] as const) delete fields[k];
+  const adapter = createInMemoryAdapter({ key: "sync-test", items: [fakeItem({ ...rec, fields })] });
+  const plan = await planSync({ adapter, source: src("osm"), config: cfg(), store: s, now: NOW, runId: "r1" });
+  const res = await s.apply(plan, { commit: true });
+  assert.equal(res.error, null);
+  const row = fake.tables.venues.find((r) => r.external_id === "v-1")!;
+  for (const col of ["address", "website", "wikidata", "opening_hours"]) {
+    assert.ok(col in row, `${col} column must be written`);
+    assert.strictEqual(row[col], null, `${col} must be null`);
+  }
+});

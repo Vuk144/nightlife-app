@@ -20,7 +20,7 @@
  * body contains no city or country names.
  */
 
-import { resolveMatch, type MatchContext } from "../matching.ts";
+import { resolveMatch, type MatchContext, type MatchOutcome } from "../matching.ts";
 import type { ExistingVenue, NormalizedVenue } from "../types.ts";
 import type { GeoPoint, IdentityOutcome, SourceRef } from "./types.ts";
 
@@ -54,6 +54,12 @@ export interface VenueIdentityRequest {
   incoming: VenueIdentityInput;
   scope: { countryCode: string; cityName: string };
   existingInCity: VenueMatchCandidate[];
+  /**
+   * Ids of existing venues this incoming record may NOT link to — already
+   * claimed by another record in the same run (the matcher's `consumed` set).
+   * Read-only here: the caller decides when a match becomes a claim.
+   */
+  consumed?: ReadonlySet<string>;
 }
 
 /*
@@ -103,7 +109,12 @@ function toIncomingVenue(input: VenueIdentityInput): NormalizedVenue {
   };
 }
 
-export function resolveVenueIdentity(req: VenueIdentityRequest): IdentityOutcome {
+/**
+ * The matcher's raw outcome for a request. Unlike `IdentityOutcome` it keeps
+ * the matcher's `review` flag (e.g. a Tier 3 alias link 300–1000 m away),
+ * for callers that must not treat such a link as confident.
+ */
+export function matchVenue(req: VenueIdentityRequest): MatchOutcome {
   const ctx: MatchContext = {
     target: {
       countryId: req.scope.countryCode,
@@ -112,10 +123,13 @@ export function resolveVenueIdentity(req: VenueIdentityRequest): IdentityOutcome
     },
     osmSourceId: req.incoming.source.sourceKey,
     existing: req.existingInCity.map(toExistingVenue),
-    consumed: new Set<string>(),
+    consumed: new Set<string>(req.consumed ?? []),
   };
+  return resolveMatch(toIncomingVenue(req.incoming), ctx);
+}
 
-  const outcome = resolveMatch(toIncomingVenue(req.incoming), ctx);
+export function resolveVenueIdentity(req: VenueIdentityRequest): IdentityOutcome {
+  const outcome = matchVenue(req);
 
   if (outcome.kind === "match") {
     return {

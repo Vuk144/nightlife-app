@@ -10,8 +10,9 @@ import { findRescue } from "./rescue.ts";
  *
  * Order (first hit wins; hard exclusions always win over everything):
  *
- *   0. hard exclusions — lifecycle, shop, office, excluded amenities,
- *      lodging-only, elderly community centre, private/members without a signal
+ *   0. hard exclusions — lifecycle, institutional (never bypassable), shop,
+ *      office, excluded amenities, lodging-only, elderly community centre,
+ *      private/members without a signal
  *   1. Layer C — curated city rescue list (data, not code)
  *   2. Layer B name layers — kafana/mehana/... names; splav names; shisha names
  *   3. Layer A — automatic global nightlife categories
@@ -102,6 +103,56 @@ const EXCLUDED_AMENITIES = new Set([
   "social_facility", "vending_machine",
 ]);
 
+/**
+ * Institutional HARD EXCLUSIONS: objects that are never nightlife venues,
+ * whatever else they are tagged with. Checked first in `classifyOsmElement`,
+ * before the pinned excluded-amenity exception and before any Layer C rescue,
+ * so no rescue (pinned or by name) can ever accept one — and an excluded
+ * element never becomes a venue record, so it never reaches identity matching
+ * or a store upsert. Deliberately small; `office=government` is the one
+ * government category the tag model represents.
+ */
+export const INSTITUTIONAL_HARD_EXCLUSIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  amenity: new Set(["place_of_worship", "school", "university", "hospital", "clinic", "library"]),
+  healthcare: new Set(["hospital", "clinic"]),
+  office: new Set(["government"]),
+};
+
+/** The institutional hard-exclusion reason for these tags, or `null`. */
+export function institutionalHardExclusion(tags: Record<string, string>): string | null {
+  for (const [key, values] of Object.entries(INSTITUTIONAL_HARD_EXCLUSIONS)) {
+    const value = lower(tags[key]);
+    if (value && values.has(value)) return `institutional hard exclusion: ${key}=${value}`;
+  }
+  return null;
+}
+
+/**
+ * Excluded amenities a Layer C rescue may still accept — and only for an entry
+ * pinned by its exact `osmRef` that declares the amenity in
+ * `excludedAmenityAllowed` (see `./rescue.ts`). Deliberately minimal: every
+ * other excluded amenity stays excluded even when pinned.
+ */
+export const PINNED_RESCUE_BYPASSABLE_AMENITIES: ReadonlySet<string> = new Set(["conference_centre"]);
+
+// An institutional exclusion must never be made bypassable.
+for (const amenity of PINNED_RESCUE_BYPASSABLE_AMENITIES) {
+  if (INSTITUTIONAL_HARD_EXCLUSIONS.amenity.has(amenity)) {
+    throw new Error(`amenity=${amenity} is an institutional hard exclusion and cannot be rescue-bypassable`);
+  }
+}
+
+/**
+ * True when `ref` is pinned by a rescue entry that explicitly allows this
+ * excluded `amenity`. The empty name means a name-matched (osmRef-less) entry
+ * can never match, so only an exact-osmRef pin qualifies.
+ */
+function pinnedRescueAllowsAmenity(amenity: string, ref?: string, target?: IngestionTarget): boolean {
+  if (!ref || !target || !PINNED_RESCUE_BYPASSABLE_AMENITIES.has(amenity)) return false;
+  const entry = findRescue(target.countryId, target.cityName, ref, "");
+  return entry?.osmRef === ref && entry.excludedAmenityAllowed === amenity;
+}
+
 const LODGING_TOURISM = new Set([
   "hotel", "hostel", "guest_house", "motel", "apartment",
   "chalet", "resort", "camp_site", "caravan_site",
@@ -140,8 +191,19 @@ const STRENGTH_RANK: Record<SignalStrength, number> = {
   none: 0, weak: 1, medium: 2, strong: 3,
 };
 
-const NAME_PERFORMANCE_REGEX =
-  /\b(jazz club|blues club|music club|live music|open mic|comedy club|stand[- ]?up|kabare|cabaret|koncert|nastup)\b/i;
+/**
+ * Name fragments that indicate a music / performance venue (a medium Layer B
+ * signal). Regex fragments, not literals (`stand[- ]?up`). The classifier
+ * wraps them in word boundaries; the Overpass query uses the same alternation
+ * (without `\b`, which Overpass does not support — a superset the classifier
+ * then re-checks), so discovery and classification share one vocabulary.
+ */
+const PERFORMANCE_NAME_TERMS = [
+  "jazz club", "blues club", "music club", "live music", "open mic",
+  "comedy club", "stand[- ]?up", "kabare", "cabaret", "koncert", "nastup",
+];
+export const PERFORMANCE_NAME_OVERPASS = PERFORMANCE_NAME_TERMS.join("|");
+const NAME_PERFORMANCE_REGEX = new RegExp(`\\b(${PERFORMANCE_NAME_TERMS.join("|")})\\b`, "i");
 
 /**
  * The strongest documented nightlife / music / performance signal on an
@@ -264,7 +326,9 @@ export function classifyOsmElement(
 ): ClassifyResult {
   const keys = Object.keys(tags);
 
-  // 0. hard exclusions — win over everything, including a rescue entry
+  // 0. hard exclusions — win over everything, including a rescue entry (sole
+  //    exception: an explicitly allowed excluded amenity on a pinned rescue,
+  //    which can never be an institutional exclusion)
   const lifecycleKey = keys.find((key) =>
     LIFECYCLE_PREFIXES.some((prefix) => key.startsWith(prefix)),
   );
@@ -272,6 +336,9 @@ export function classifyOsmElement(
   if (lower(tags.disused) === "yes" || lower(tags.abandoned) === "yes") {
     return { accepted: false, reason: "disused / abandoned" };
   }
+  // institutional objects: no exception, no rescue can ever reach them
+  const institutional = institutionalHardExclusion(tags);
+  if (institutional) return { accepted: false, reason: institutional };
 
   const amenity = lower(tags.amenity);
   const club = lower(tags.club);
@@ -283,7 +350,7 @@ export function classifyOsmElement(
   // not exclusions — `truthy()` filters the no/none/false/0 family.
   if (truthy(tags.shop)) return { accepted: false, reason: `shop=${tags.shop}` };
   if (truthy(tags.office)) return { accepted: false, reason: `office=${tags.office}` };
-  if (amenity && EXCLUDED_AMENITIES.has(amenity)) {
+  if (amenity && EXCLUDED_AMENITIES.has(amenity) && !pinnedRescueAllowsAmenity(amenity, ref, target)) {
     return { accepted: false, reason: `amenity=${amenity}` };
   }
   if (tags.tourism && LODGING_TOURISM.has(lower(tags.tourism)) && !amenity && !club) {

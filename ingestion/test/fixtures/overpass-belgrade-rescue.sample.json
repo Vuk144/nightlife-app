@@ -1,0 +1,335 @@
+{
+  "elements": [
+    {
+      "type": "node",
+      "id": 1634937968,
+      "lat": 44.8174963,
+      "lon": 20.464101,
+      "tags": {
+        "amenity": "restaurant",
+        "check_date": "2024-07-13",
+        "cuisine": "regional",
+        "email": "rezervacije@dvajelena.rs",
+        "int_name": "Dva jelena",
+        "name": "Два јелена",
+        "name:en": "Dva jelena",
+        "name:sr": "Два јелена",
+        "name:sr-Latn": "Dva jelena",
+        "opening_hours": "Mo-Su 10:00-01:00",
+        "phone": "+381 62 350002",
+        "website": "http://www.dvajelena.rs/",
+        "wikidata": "Q65200062",
+        "wikipedia": "sr:Кафана Два јелена"
+      }
+    },
+    {
+      "type": "node",
+      "id": 1634937981,
+      "lat": 44.8172363,
+      "lon": 20.4639323,
+      "tags": {
+        "addr:housenumber": "26",
+        "addr:street": "Скадарска",
+        "amenity": "restaurant",
+        "check_date": "2026-06-07",
+        "contact:facebook": "https://www.facebook.com/zlatnibokal/",
+        "contact:instagram": "https://www.instagram.com/zlatni_bokal/",
+        "contact:linkedin": "https://www.linkedin.com/company/zlatni-bokal/",
+        "cuisine": "regional",
+        "int_name": "Zlatni bokal",
+        "level": "0",
+        "name": "Златни бокал",
+        "name:sr": "Златни бокал",
+        "name:sr-Latn": "Zlatni bokal",
+        "opening_hours": "Mo-Su 10:00-02:00",
+        "phone": "+381 60 1111992",
+        "website": "https://zlatnibokal.com"
+      }
+    },
+    {
+      "type": "node",
+      "id": 1634938018,
+      "lat": 44.817597,
+      "lon": 20.4639383,
+      "tags": {
+        "addr:housenumber": "21",
+        "addr:street": "Скадарска",
+        "amenity": "restaurant",
+        "check_date": "2024-07-13",
+        "contact:facebook": "https://www.facebook.com/sesirmojrestoran",
+        "contact:instagram": "https://www.instagram.com/sesir_moj/",
+        "cuisine": "regional",
+        "email": "info@sesirmoj.rs",
+        "int_name": "Sesir moj",
+        "name": "Шешир мој",
+        "name:en": "Sesir moj",
+        "name:sr": "Шешир мој",
+        "name:sr-Latn": "Šešir moj",
+        "opening_hours": "Mo-Su 10:00-01:00",
+        "phone": "+381 11 7228750;+381 11 7346777",
+        "website": "https://www.sesirmoj.rs/"
+      }
+    },
+    {
+      "type": "node",
+      "id": 4118716889,
+      "lat": 44.8143169,
+      "lon": 20.4504154,
+      "tags": {
+        "addr:housenumber": "4",
+        "addr:street": "Браће Крсмановић",
+        "amenity": "arts_centre",
+        "check_date": "2025-11-03",
+        "contact:instagram": "kcgrad",
+        "full_name": "Културни центар Град",
+        "full_name:en": "Cultural Centre Grad",
+        "full_name:sr": "Културни центар Град",
+        "full_name:sr-Latn": "Kulturni centar Grad",
+        "int_name": "KC Grad",
+        "name": "КЦ Град",
+        "name:en": "KC Grad",
+        "name:sr": "КЦ Град",
+        "name:sr-Latn": "KC Grad",
+        "website": "https://kcgrad.rs",
+        "wikidata": "Q110049827",
+        "wikipedia": "sr:Културни центар Град"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6782874303,
+      "lat": 44.8230214,
+      "lon": 20.4591245,
+      "tags": {
+        "addr:city": "Београд",
+        "addr:housenumber": "87-89",
+        "addr:postcode": "11000",
+        "addr:street": "Краља Петра",
+        "air_conditioning": "yes",
+        "amenity": "cafe",
+        "bar": "yes",
+        "check_date": "2025-09-14",
+        "indoor_seating": "yes",
+        "internet_access": "yes",
+        "internet_access:fee": "no",
+        "name": "Dorian Grey",
+        "opening_hours": "Mo-Fr 08:00-24:00; Sa-Su 09:00-24:00",
+        "outdoor_seating": "yes",
+        "payment:cash": "yes",
+        "payment:credit_cards": "yes",
+        "phone": "+381112634151",
+        "reservation": "yes",
+        "smoking": "yes",
+        "takeaway": "yes",
+        "website": "https://doriangray.rs/",
+        "wheelchair": "limited"
+      }
+    },
+    {
+      "type": "node",
+      "id": 6844070707,
+      "lat": 44.8166243,
+      "lon": 20.4860226,
+      "tags": {
+        "amenity": "events_venue",
+        "name": "Bitef Art Cafe",
+        "wikidata": "Q85992064",
+        "wikipedia": "sr:Битеф арт кафе"
+      }
+    },
+    {
+      "type": "node",
+      "id": 12872107296,
+      "lat": 44.8061375,
+      "lon": 20.4641625,
+      "tags": {
+        "amenity": "arts_centre",
+        "check_date": "2025-07-09",
+        "int_name": "Studentski kulturni centar",
+        "name": "Студентски културни центар",
+        "name:sr": "Студентски културни центар",
+        "name:sr-Latn": "Studentski kulturni centar",
+        "short_name": "СКЦ",
+        "short_name:sr": "СКЦ",
+        "short_name:sr-Latn": "SKC",
+        "wheelchair": "yes",
+        "wikidata": "Q3500923",
+        "wikipedia": "sr:Студентски културни центар Београд"
+      }
+    },
+    {
+      "type": "node",
+      "id": 13045146275,
+      "lat": 44.8194441,
+      "lon": 20.453933,
+      "tags": {
+        "amenity": "restaurant",
+        "contact:instagram": "https://www.instagram.com/grcka_kraljica/",
+        "int_name": "Grcka kraljica",
+        "name": "Грчка краљица",
+        "name:sr": "Грчка краљица",
+        "name:sr-Latn": "Grčka kraljica"
+      }
+    },
+    {
+      "type": "way",
+      "id": 23671766,
+      "center": {
+        "lat": 44.8226009,
+        "lon": 20.4538694
+      },
+      "tags": {
+        "addr:housenumber": "1",
+        "addr:street": "Калемегдан мали",
+        "amenity": "arts_centre",
+        "building": "yes",
+        "building:levels": "2",
+        "heritage": "2",
+        "heritage:RS:inscription_date": "1981-08-14",
+        "heritage:RS:jurisdiction": "Завод за заштиту споменика културе града Београда",
+        "heritage:RS:name": "Уметнички павиљон \"Цвијета Зузорић\"",
+        "heritage:website": "https://nasledje.gov.rs/index.cfm/spomenici/pregled_spomenika?spomenik_id=108696",
+        "image": "https://photos.app.goo.gl/2ZUXKteSz9ruvtN86",
+        "int_name": "Umetnicki paviljon Cvijeta Zuzoric",
+        "name": "Уметнички павиљон Цвијета Зузорић",
+        "name:en": "Cvijeta Zuzoric Art Pavilion",
+        "name:sr": "Уметнички павиљон Цвијета Зузорић",
+        "name:sr-Latn": "Umetnički paviljon Cvijeta Zuzorić",
+        "protect_class": "22",
+        "ref:RS:kucni_broj": "3211074",
+        "ref:RS:nkd": "SK120",
+        "start_date": "1928",
+        "wikidata": "Q3373107",
+        "wikimedia_commons": "Category:Cvijeta Zuzorić Art Pavilion",
+        "wikipedia": "sr:Уметнички павиљон „Цвијета Зузорић”",
+        "year_of_construction": "1927. .1928"
+      }
+    },
+    {
+      "type": "way",
+      "id": 41234985,
+      "center": {
+        "lat": 44.815423,
+        "lon": 20.4628098
+      },
+      "tags": {
+        "addr:housenumber": "22",
+        "addr:street": "Македонска",
+        "amenity": "arts_centre",
+        "building": "yes",
+        "building:levels": "2",
+        "int_name": "Dom omladine Beograda",
+        "name": "Дом омладине Београда",
+        "name:en": "Belgrade Youth Center",
+        "name:sr": "Дом омладине Београда",
+        "name:sr-Latn": "Dom omladine Beograda",
+        "name:uk": "Белградський Будинок Молоді",
+        "ref:RS:kucni_broj": "3211508",
+        "start_date": "1964",
+        "website": "https://www.domomladine.org/",
+        "wikidata": "Q4882656",
+        "wikimedia_commons": "Category:Belgrade Youth Center",
+        "wikipedia": "sr:Дом омладине Београда"
+      }
+    },
+    {
+      "type": "way",
+      "id": 149635378,
+      "center": {
+        "lat": 44.8179486,
+        "lon": 20.4646959
+      },
+      "tags": {
+        "addr:housenumber": "38",
+        "addr:street": "Скадарска",
+        "amenity": "restaurant",
+        "building": "commercial",
+        "building:levels": "1",
+        "email": "info@imadana.rs",
+        "int_name": "Ima dana",
+        "name": "Има дана",
+        "name:sr": "Има дана",
+        "name:sr-Latn": "Ima dana",
+        "opening_hours": "Mo-We 11:30-01:00; Th-Su 11:30-02:00",
+        "phone": "+381 62 515136",
+        "ref:RS:kucni_broj": "3211094",
+        "start_date": "mid C20",
+        "website": "https://imadana.rs/",
+        "wikidata": "Q110048715",
+        "wikipedia": "sr:Ресторан Има дана",
+        "year_of_construction": "mid C20"
+      }
+    },
+    {
+      "type": "way",
+      "id": 150590534,
+      "center": {
+        "lat": 44.8181496,
+        "lon": 20.4646165
+      },
+      "tags": {
+        "addr:housenumber": "29",
+        "addr:street": "Скадарска",
+        "amenity": "restaurant",
+        "building": "commercial",
+        "building:levels": "1",
+        "check_date": "2025-11-21",
+        "contact:facebook": "https://www.facebook.com/tri.sesira.skadarlija/",
+        "contact:instagram": "https://www.instagram.com/tri_sesira/",
+        "contact:linkedin": "https://www.linkedin.com/company/tri-sesira/?viewAsMember=true",
+        "contact:tiktok": "https://www.tiktok.com/@trisesira?lang=en",
+        "cuisine": "regional",
+        "mobile": "+381 60 3130180",
+        "name": "Три шешира",
+        "name:en": "Tri šešira",
+        "name:sr": "Три шешира",
+        "name:sr-Latn": "Tri šešira",
+        "opening_hours": "Mo-Su 11:00-02:00",
+        "phone": "+381 11 7247501",
+        "ref:RS:kucni_broj": "3209769",
+        "start_date": "1864",
+        "website": "https://www.trisesira.rs",
+        "wikidata": "Q12760217",
+        "wikipedia": "sr:Кафана Три шешира"
+      }
+    },
+    {
+      "type": "way",
+      "id": 393274192,
+      "center": {
+        "lat": 44.8190853,
+        "lon": 20.456328
+      },
+      "tags": {
+        "alt_name": "Коларчева задужбина",
+        "alt_name:en": "Kolarac Endowment",
+        "alt_name:sr": "Коларчева задужбина",
+        "alt_name:sr-Latn": "Kolarčeva zadužbina",
+        "amenity": "arts_centre",
+        "building": "yes",
+        "building:levels": "5",
+        "email": "office@kolarac.rs",
+        "heritage": "2",
+        "heritage:RS:inscription_date": "1985-09-30",
+        "heritage:RS:jurisdiction": "Завод за заштиту споменика културе града Београда",
+        "heritage:RS:name": "Зграда Коларчевог народног универзизета",
+        "heritage:website": "https://nasledje.gov.rs/index.cfm/spomenici/pregled_spomenika?spomenik_id=109156",
+        "int_name": "Zaduzbina Ilije M. Kolarca",
+        "name": "Задужбина Илије М. Коларца",
+        "name:en": "Ilija M. Kolarac Endowment",
+        "name:ru": "Задужбина Илии М. Колараца",
+        "name:sr": "Задужбина Илије М. Коларца",
+        "name:sr-Latn": "Zadužbina Ilije M. Kolarca",
+        "phone": "+381 11 2181903;+381 11 2630550",
+        "protect_class": "22",
+        "ref:RS:nkd": "SK647",
+        "start_date": "1932",
+        "website": "http://www.kolarac.rs/",
+        "wikidata": "Q3075477",
+        "wikimedia_commons": "Category:Zgrada Kolarčevog narodnog univerziteta",
+        "wikipedia": "sr:Задужбина Илије М. Коларца",
+        "year_of_construction": "1929..1932"
+      }
+    }
+  ]
+}

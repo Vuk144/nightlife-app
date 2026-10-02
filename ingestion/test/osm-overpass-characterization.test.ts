@@ -109,7 +109,7 @@ area(id:3602728438)->.bg;
   nwr["amenity"="biergarten"](area.bg);
   nwr["amenity"="music_venue"](area.bg);
   nwr["amenity"="karaoke_box"](area.bg);
-  nwr["club"~"^(music|nightlife|social)$"](area.bg);
+  nwr["club"~"^(music|nightlife)$"](area.bg);
   nwr["karaoke"="yes"](area.bg);
   nwr["leisure"~"^(dance|karaoke)$"](area.bg);
   // Regional name layers — kafana / splav / shisha
@@ -126,18 +126,22 @@ area(id:3602728438)->.bg;
   nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["dancefloor"="yes"](area.bg);
   nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["stage"="yes"](area.bg);
   nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["karaoke"="yes"](area.bg);
-  nwr["amenity"="theatre"]["theatre:type"~"^(concert_hall|music|cabaret)$"](area.bg);
-  nwr["amenity"="theatre"]["theatre:genre"~"^(comedy|cabaret|stand_up)$"](area.bg);
-  nwr["amenity"="community_centre"]["community_centre"~"^(music|arts|youth_centre)$"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["dj"="yes"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["concerts"="yes"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["disco"="yes"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["nightclub"="yes"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["theatre:type"~"^(concert_hall|music|cabaret)$"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["theatre:genre"~"^(comedy|cabaret|stand_up)$"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["community_centre"~"^(music|arts|youth_centre)$"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["microbrewery"="yes"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["brewery"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["real_ale"="yes"](area.bg);
+  nwr["amenity"~"^(restaurant|cafe|theatre|arts_centre|community_centre|social_centre|events_venue)$"]["name"~"jazz club|blues club|music club|live music|open mic|comedy club|stand[- ]?up|kabare|cabaret|koncert|nastup",i](area.bg);
+  nwr["craft"="brewery"](area.bg);
+  nwr["club"="social"](area.bg);
   nwr["amenity"~"^(restaurant|cafe)$"]["bar"="yes"](area.bg);
-  nwr["amenity"~"^(restaurant|cafe|pub|bar)$"]["microbrewery"="yes"](area.bg);
-  nwr["amenity"~"^(restaurant|cafe|pub|bar)$"]["brewery"](area.bg);
-  nwr["amenity"~"^(restaurant|cafe|pub|bar)$"]["real_ale"="yes"](area.bg);
-  nwr["craft"="brewery"]["microbrewery"="yes"](area.bg);
-  nwr["craft"="brewery"]["taproom"="yes"](area.bg);
-  nwr["craft"="brewery"]["amenity"~"^(bar|pub)$"](area.bg);
-  node(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303);
-  way(id:41234985,23671766,393274192,150590534,149635378);
+  node(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303,4773685799,11928740863);
+  way(id:41234985,23671766,393274192,150590534,149635378,203161878);
 );
 out tags center;`.replace(/\r\n/g, "\n");
 
@@ -169,9 +173,9 @@ test("buildOverpassQuery: a target with rescue refs emits Layer C id clauses, NO
   // …but the id-based Layer C clauses ARE present (node then way, no relation):
   assert.match(
     q,
-    /\n  node\(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303\);\n/,
+    /\n  node\(id:12872107296,4118716889,6844070707,1634937968,1634938018,1634937981,13045146275,6782874303,4773685799,11928740863\);\n/,
   );
-  assert.match(q, /\n  way\(id:41234985,23671766,393274192,150590534,149635378\);\n/);
+  assert.match(q, /\n  way\(id:41234985,23671766,393274192,150590534,149635378,203161878\);\n/);
   assert.doesNotMatch(q, /\n  relation\(id:/);
 });
 
@@ -181,8 +185,8 @@ test("buildOverpassQuery: a target with no rescue rows and no rescue refs has no
   assert.doesNotMatch(q, /node\(id:/);
   assert.doesNotMatch(q, /way\(id:/);
   assert.doesNotMatch(q, /relation\(id:/);
-  // the union still closes straight after the brewery clauses:
-  assert.match(q, /nwr\["craft"="brewery"\]\["amenity"~"\^\(bar\|pub\)\$"\]\(area\.bg\);\n\);\nout tags center;$/);
+  // the union still closes straight after the last Layer B clause:
+  assert.match(q, /nwr\["amenity"~"\^\(restaurant\|cafe\)\$"\]\["bar"="yes"\]\(area\.bg\);\n\);\nout tags center;$/);
   assert.doesNotMatch(q, /\r/);
 });
 

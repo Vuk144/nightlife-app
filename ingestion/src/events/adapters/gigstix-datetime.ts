@@ -70,8 +70,11 @@ function isRealDate(year: number, month: number, day: number): boolean {
  *   "petak 30. oktobra 2026."         -> { local: "2026-10-30",       "date" }
  *
  * The leading day-of-week word is ignored. Time separators `.`, `:` and `h` are
- * accepted. Returns `null` when no day / month / year can be recognised — the
- * caller must treat that as a parse failure and never guess a date.
+ * accepted. Returns `null` when no day / month / year can be recognised, or
+ * when a time IS present but impossible ("25.00", "23.75") — the caller must
+ * treat that as a parse failure and never guess a date. A malformed time is
+ * never downgraded to a date-only value: that would silently turn a stated
+ * start time into "local midnight".
  */
 export function parseSerbianDateTime(raw: string): ParsedLocalDateTime | null {
   const text = raw
@@ -95,12 +98,11 @@ export function parseSerbianDateTime(raw: string): ParsedLocalDateTime | null {
   if (match[4] != null && match[5] != null) {
     const hour = Number(match[4]);
     const minute = Number(match[5]);
-    if (hour <= 23 && minute <= 59) {
-      return {
-        local: `${date}T${pad2(hour)}:${pad2(minute)}`,
-        precision: "datetime",
-      };
-    }
+    if (hour > 23 || minute > 59) return null;
+    return {
+      local: `${date}T${pad2(hour)}:${pad2(minute)}`,
+      precision: "datetime",
+    };
   }
   return { local: date, precision: "date" };
 }

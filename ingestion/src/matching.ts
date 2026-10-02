@@ -36,6 +36,13 @@ function coordsOf(v: {
 }
 
 /**
+ * A real OSM object reference (`node/123`, `way/…`, `relation/…`). Other
+ * callers of `resolveMatch` (the event pipeline) pass their own ids, including
+ * a synthetic `name:<normalized>` fallback, which identifies no source object.
+ */
+const OSM_OBJECT_REF = /^(node|way|relation)\/\d+$/;
+
+/**
  * Deterministic tiered matcher. Tiers are tried strictly in order 0 -> 4 and
  * the first hit wins.
  *
@@ -106,7 +113,33 @@ export function resolveMatch(
         v.name_normalized != null &&
         v.name_normalized === incoming.nameNormalized,
     );
-    if (exact.length === 1) return { kind: "match", tier: 2, venue: exact[0] };
+    if (exact.length === 1) {
+      const [candidate] = exact;
+      // Same source, different object: the source itself says these are two
+      // distinct features (e.g. two branches of one chain in the same city).
+      // A shared name is no evidence they are the same place — never merge
+      // them by name. They are two venues: no match (flagged for review), which
+      // is also exactly what happens when the other object was already
+      // consumed earlier in the run, so the outcome no longer depends on
+      // element order. (Tier 0 already matched the same object; an unowned
+      // row or another source's row is unaffected.) Only real OSM object refs
+      // on BOTH sides count — a synthetic `name:` id is no object identity.
+      if (
+        candidate.source_id != null &&
+        candidate.source_id === ctx.osmSourceId &&
+        candidate.external_id != null &&
+        candidate.external_id !== incoming.externalId &&
+        OSM_OBJECT_REF.test(candidate.external_id) &&
+        OSM_OBJECT_REF.test(incoming.externalId)
+      ) {
+        return {
+          kind: "new",
+          review: true,
+          note: `same name as "${candidate.name}" (${candidate.external_id}), but the same source lists them as different objects — not merged by name`,
+        };
+      }
+      return { kind: "match", tier: 2, venue: candidate };
+    }
     if (exact.length > 1) {
       return {
         kind: "skip",

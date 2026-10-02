@@ -449,18 +449,22 @@ test("[externalId] empty-string externalId is rejected; a whitespace-only one cu
   }
 });
 
-// ── event startLocal: presence check, not a format / trim check ──
-test("[startLocal] empty-string start is rejected; whitespace or unparseable text passes validation (the store defers it later)", () => {
-  assert.equal(
-    validateRecord({ record: eventRecord({ fields: { startLocal: "" } }), scope: scope(), country: country() }).reasonCode,
-    "missing-start",
-  );
-  for (const s of ["   ", "next friday", "2026-02-30"]) {
+// ── event startLocal: presence AND format check (the event contract) ──
+test("[startLocal][BUG regression] a blank start is missing; unparseable or impossible text is rejected at validation, not deferred to the store", () => {
+  // Before the event contract, only presence was checked: "next friday" and
+  // "2026-02-30" validated "ok", were planned as upserts, and only the store
+  // deferred them at apply time.
+  for (const s of ["", "   "]) {
     assert.equal(
-      validateRecord({ record: eventRecord({ fields: { startLocal: s } }), scope: scope(), country: country() }).outcome,
-      "ok",
-      `validation does not format-check startLocal — ${JSON.stringify(s)}`,
+      validateRecord({ record: eventRecord({ fields: { startLocal: s } }), scope: scope(), country: country() }).reasonCode,
+      "missing-start",
+      JSON.stringify(s),
     );
+  }
+  for (const s of ["next friday", "2026-02-30"]) {
+    const r = validateRecord({ record: eventRecord({ fields: { startLocal: s } }), scope: scope(), country: country() });
+    assert.equal(r.outcome, "rejected", JSON.stringify(s));
+    assert.equal(r.reasonCode, "invalid-start", JSON.stringify(s));
   }
 });
 
