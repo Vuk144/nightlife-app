@@ -114,12 +114,20 @@ const zgVenue = (externalId: string, name: string) =>
   fakeItem(venueRecord({ sourceKey: "osm", externalId, countryCode: "HR", cityText: "Zagreb", name }));
 const osmLink = (externalId: string, over: Partial<SourceLink> = {}): SourceLink =>
   activeEventLink({ id: `l-${externalId}`, kind: "venue", sourceKey: "osm", externalId, canonicalId: `c-${externalId}`, ...over });
+/** OSM venue links plus the Zagreb venue rows they own (reconciliation only covers stored venues in the run's cities). */
+function addOsmLinks(store: ReturnType<typeof seededStore>, ...links: SourceLink[]): void {
+  const zagreb = store.venues.find((v) => v.id === "v-zg-mocvara")!;
+  for (const l of links) {
+    store.links.push(l);
+    store.venues.push({ ...zagreb, id: l.canonicalId, name: l.externalId, normalizedName: l.externalId, coordinates: null, sourceKey: "osm", externalId: l.externalId });
+  }
+}
 
 test("a `limit` that truncates discovery makes the run partial and protects every unseen stored record", async () => {
   const items = [1, 2, 3, 4, 5].map((i) => zgVenue(`v${i}`, `Klub ${i}`));
   const run = async (limit: number | undefined) => {
     const store = seededStore();
-    store.links.push(osmLink("v-old"), osmLink("v5"));
+    addOsmLinks(store, osmLink("v-old"), osmLink("v5"));
     return planSync({ adapter: createInMemoryAdapter({ key: "osm", items }), source: provider().source("osm")!, config: provider(), store, now: NOW, runId: "r", limit });
   };
 
@@ -183,7 +191,7 @@ test("a FAILED partial run still reconciles nothing", async () => {
 test("snapshot-style adapter: a partial run is not a false collapse; the same data as a complete run still trips the guard", async () => {
   const run = async (completeness: RunCompleteness) => {
     const store = seededStore();
-    for (let i = 0; i < 10; i++) store.links.push(osmLink(`s${i}`));
+    for (let i = 0; i < 10; i++) addOsmLinks(store, osmLink(`s${i}`));
     return planSync({
       adapter: createInMemoryAdapter({ key: "osm", items: [zgVenue("s0", "Klub S0")], capabilities: { snapshotRefs: true } }),
       source: provider().source("osm")!, config: provider(), store, now: NOW, runId: "r", completeness,

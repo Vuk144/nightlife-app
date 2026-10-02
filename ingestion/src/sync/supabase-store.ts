@@ -42,17 +42,35 @@ import type {
   EntityKind,
   JsonValue,
   ReconcileAction,
+  SourceStatus,
   SyncApplyError,
   SyncApplyResult,
   SyncPlan,
 } from "./types.ts";
 
 const VENUE_COLS =
-  "id, city_id, name, description, address, latitude, longitude, opening_time, closing_time, is_active, name_normalized, coordinates_source, website, opening_hours, wikidata, source_id, external_id, source_url, last_synced_at, created_at, updated_at";
+  "id, city_id, name, description, address, latitude, longitude, opening_time, closing_time, is_active, name_normalized, coordinates_source, website, opening_hours, wikidata, source_id, external_id, source_url, last_synced_at, created_at, updated_at, source_status, consecutive_misses";
 const EVENT_COLS =
   "id, venue_id, title, description, start_at, end_at, cover_image_url, ticket_url, is_cancelled, source_id, external_id, source_url, last_synced_at, created_at, updated_at";
 
 type Row = Record<string, unknown>;
+
+interface VenueLifecycle {
+  sourceStatus: SourceStatus;
+  consecutiveMisses: number;
+}
+const ACTIVE_LIFECYCLE: VenueLifecycle = { sourceStatus: "active", consecutiveMisses: 0 };
+const SOURCE_STATUSES = new Set<string>(["active", "stale", "missing", "gone"]);
+
+/** A row's persisted lifecycle; a row without the columns reads as the column defaults. */
+function venueLifecycleOf(r: Row): VenueLifecycle {
+  const status = String(r.source_status ?? "active");
+  const misses = Number(r.consecutive_misses ?? 0);
+  return {
+    sourceStatus: SOURCE_STATUSES.has(status) ? (status as SourceStatus) : "active",
+    consecutiveMisses: Number.isInteger(misses) && misses >= 0 ? misses : 0,
+  };
+}
 
 class HaltError extends Error {
   constructor(readonly apply: SyncApplyError) {
@@ -76,6 +94,8 @@ export class SupabaseCanonicalStore implements CanonicalStore {
   private readonly now: () => string;
   private readonly sourceIdByKey = new Map<string, string>();
   private readonly sourceKeyById = new Map<string, string>();
+  /** Persisted source lifecycle per venue id, as of the latest row read. */
+  private readonly venueLifecycle = new Map<string, VenueLifecycle>();
 
   constructor(client: SupabaseClient, opts: SupabaseCanonicalStoreOptions = {}) {
     this.db = client;
@@ -330,14 +350,16 @@ export class SupabaseCanonicalStore implements CanonicalStore {
       firstSeenAt: row.createdAt,
       lastSeenAt: row.updatedAt,
       lastSyncedAt: row.updatedAt,
-      sourceStatus: "active", // no lifecycle column in the current schema
-      consecutiveMisses: 0,
+      // venues persist their lifecycle (source_status / consecutive_misses);
+      // events have no lifecycle columns yet
+      ...((kind === "venue" && this.venueLifecycle.get(canonicalId)) || ACTIVE_LIFECYCLE),
     };
   }
 
   private async venueRowToCanonical(r: Row): Promise<CanonicalVenue> {
     const embedded = r.cities as Row | null | undefined;
     const str = (v: unknown): string | null => (v == null ? null : String(v));
+    this.venueLifecycle.set(String(r.id), venueLifecycleOf(r));
     return {
       id: String(r.id),
       cityId: String(r.city_id),
@@ -417,7 +439,15 @@ export class SupabaseCanonicalStore implements CanonicalStore {
           `reconciliation skipped: ${plan.reconciliation.skippedReason ?? "run not healthy"}`,
         );
       } else {
-        for (const a of plan.reconciliation.actions) this.planReconcileAction(a, result);
+        const partial = plan.run?.completeness === "partial";
+        if (partial && plan.reconciliation.actions.some((a) => a.kind === "venue")) {
+          result.notes.push("partial run: venue lifecycle not changed (only a complete snapshot moves it)");
+        }
+        for (const a of plan.reconciliation.actions) {
+          if (a.kind === "venue") {
+            if (!partial) await this.applyVenueLifecycle(a, plan.run.sourceKey, result);
+          } else this.planReconcileAction(a, result);
+        }
       }
 
       result.committed = true;
@@ -840,6 +870,46 @@ export class SupabaseCanonicalStore implements CanonicalStore {
     };
   }
 
+  /**
+   * Persist one venue lifecycle transition (healthy, complete runs only).
+   * stale / missing record the miss; gone also sets `is_active = false`; a
+   * `keep-active` from a non-active state resets the lifecycle, and from `gone`
+   * reactivates (`is_active = true`). A curated `is_active = false` on an
+   * active-lifecycle row is never touched. Writes only when the state changes,
+   * only to a row this source still owns, and never deletes anything.
+   */
+  private async applyVenueLifecycle(
+    a: ReconcileAction,
+    sourceKey: string,
+    result: SyncApplyResult,
+  ): Promise<void> {
+    if (a.transition === "no-op") return;
+    const now = this.now();
+    let patch: Row;
+    if (a.transition === "keep-active") {
+      // `misses` > 0 here is an unseen record still below the stale threshold
+      if (a.from === "active" && a.misses === 0) return;
+      patch = { source_status: "active", consecutive_misses: a.misses };
+      if (a.from === "gone") Object.assign(patch, { is_active: true, updated_at: now });
+    } else {
+      const status = a.transition === "mark-stale" ? "stale" : a.transition === "mark-missing" ? "missing" : "gone";
+      patch = { source_status: status, consecutive_misses: a.misses };
+      if (status === "gone") Object.assign(patch, { is_active: false, updated_at: now });
+    }
+
+    const sid = await this.sourceId(sourceKey, false);
+    const res = sid
+      ? await this.db.from("venues").update(patch).eq("id", a.canonicalId).eq("source_id", sid).select("id")
+      : { data: [], error: null };
+    this.throwOnError(res.error, ctx("reconcile", "venue", a.canonicalId, sourceKey, null, "venues.update"));
+    if (((res.data as Row[] | null) ?? []).length !== 1) {
+      result.deferred.push(`venue lifecycle ${a.transition} for ${a.key} not applied — row ${a.canonicalId} not owned by "${sourceKey}"`);
+      return;
+    }
+    result.reconciled++;
+    result.notes.push(`venue ${a.canonicalId}: ${a.from} → ${patch.source_status} (misses ${a.misses})`);
+  }
+
   private planReconcileAction(a: ReconcileAction, result: SyncApplyResult): void {
     if (a.transition === "no-op" || a.transition === "keep-active") {
       // "keep-active" rows were already touched (last_synced_at) by their upsert.
@@ -847,7 +917,7 @@ export class SupabaseCanonicalStore implements CanonicalStore {
     }
     // mark-stale / mark-missing / mark-gone
     result.deferred.push(
-      `reconciliation ${a.transition} for ${a.kind} ${a.key} NOT persisted — current schema has no source_status / consecutive_misses column. No hard delete, no cancellation.`,
+      `reconciliation ${a.transition} for ${a.kind} ${a.key} NOT persisted — events have no source_status / consecutive_misses columns yet. No hard delete, no cancellation.`,
     );
   }
 

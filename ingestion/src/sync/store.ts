@@ -365,7 +365,11 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     }
 
     if (plan.reconciliation.reconciled) {
-      for (const a of plan.reconciliation.actions) this.applyReconcile(a, result);
+      // a partial run never moves a venue's lifecycle (mirrors SupabaseCanonicalStore)
+      const partial = plan.run?.completeness === "partial";
+      for (const a of plan.reconciliation.actions) {
+        if (!(partial && a.kind === "venue")) this.applyReconcile(a, result);
+      }
     }
 
     this.applied.push(result);
@@ -570,9 +574,14 @@ export class InMemoryCanonicalStore implements CanonicalStore {
       (l) => `${l.sourceKey}:${l.externalId}` === a.key && l.kind === a.kind,
     );
     if (!target || a.transition === "no-op") return;
+    // venue lifecycle → is_active: gone deactivates, seen-again-after-gone
+    // reactivates; a curated is_active on an active-lifecycle venue is left alone
+    const venue = a.kind === "venue" ? this.venues.find((v) => v.id === target.canonicalId) : undefined;
+    if (venue && a.transition === "mark-gone") venue.isActive = false;
+    if (venue && a.transition === "keep-active" && a.from === "gone") venue.isActive = true;
     if (a.transition === "keep-active") {
       target.sourceStatus = "active";
-      target.consecutiveMisses = 0;
+      target.consecutiveMisses = a.misses;
     } else {
       target.sourceStatus =
         a.transition === "mark-stale"

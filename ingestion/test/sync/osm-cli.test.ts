@@ -237,15 +237,16 @@ test("[safety][7A] a COLLAPSED snapshot: --commit refused even though the return
   assert.match(r.text, /reason: collapsed result/);
 });
 
-test("[safety][7A] a HEALTHY snapshot missing one venue: applied, reconciliation only DEFERRED (not persisted), no row removed", async () => {
+test("[safety][7A] a HEALTHY snapshot missing one venue: applied, the miss persisted as stale (still active), no row removed", async () => {
   const fake = fakeDb();
   await cli(["--commit"], { store: spiedStore(fake).store });
   const withoutOne: OverpassResponse = { elements: (FIXTURE.elements ?? []).filter((e) => e.id !== 8008) };
   const r = await cli(["--commit"], { store: spiedStore(fake).store, response: withoutOne });
   assert.equal(r.code, 0, r.text);
   assert.match(r.text, /reconciliation: RECONCILED — stale 1/);
-  assert.match(r.text, /reconciliation mark-stale for venue OpenStreetMap:node\/8008 NOT persisted/);
   assert.equal(fake.tables.venues.length, ACCEPTED);
+  const dropped = fake.tables.venues.find((v) => v.external_id === "node/8008")!;
+  assert.deepEqual([dropped.source_status, dropped.consecutive_misses, dropped.is_active], ["stale", 1, true]);
 });
 
 test("[safety] commitRefusal: only an ok + healthy plan may be applied", () => {

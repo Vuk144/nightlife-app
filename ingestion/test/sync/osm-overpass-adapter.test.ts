@@ -731,3 +731,343 @@ test("[7B] no reliable match → the unrelated seeded venue keeps its name; the 
   assert.equal(inserted.name, "Drugstore", "a new OSM venue is stored under its OSM name");
   assert.notEqual(inserted.id, "v-other");
 });
+
+// ── Venue lifecycle contract ──────────────────────────────────────────────
+//
+// A known OSM venue absent from a HEALTHY, COMPLETE OSM snapshot moves through
+// the reconciliation lifecycle (active → stale → missing → gone); at gone it
+// becomes `is_active = false` — never hard-deleted. Seen again, it is active
+// again with its misses reset. An unhealthy / failed / partial run changes no
+// lifecycle state. Event activity plays no part: OSM reconciles venues only.
+// [lifecycle A–C] run on the in-memory store; [lifecycle S*] persist through
+// SupabaseCanonicalStore (fake Supabase) — source_status / consecutive_misses /
+// is_active.
+
+const DROPPED = "OpenStreetMap:node/8008";
+const withoutDropped = async (): Promise<OverpassResponse> => ({ elements: (FIXTURE.elements ?? []).filter((e) => e.id !== 8008) });
+const linkOf = async (store: InMemoryCanonicalStore, key: string) =>
+  (await store.listSourceLinks("venue", OSM_SOURCE_KEY)).find((l) => `${l.sourceKey}:${l.externalId}` === key)!;
+
+test("[lifecycle A] a venue absent from consecutive healthy complete snapshots progresses stale → missing → gone, and is never deleted", async () => {
+  const { store } = await syncedBelgrade();
+  const venueId = (await linkOf(store, DROPPED)).canonicalId;
+  const steps: [string, number][] = [];
+  for (let run = 0; run < 3; run++) {
+    const p = await planWith(store, withoutDropped);
+    assert.equal(p.stats.status, "ok");
+    assert.equal(p.stats.healthy, true);
+    assert.equal(p.reconciliation.reconciled, true);
+    const acts = destructive(p);
+    assert.equal(acts.length, 1, "only the dropped venue gets a lifecycle action");
+    assert.equal(acts[0].key, DROPPED);
+    assert.equal(acts[0].kind, "venue");
+    assert.equal(acts[0].canonicalId, venueId);
+    steps.push([acts[0].transition, acts[0].misses]);
+    await store.apply(p, { commit: true });
+  }
+  assert.deepEqual(steps, [["mark-stale", 1], ["mark-missing", 2], ["mark-gone", 3]]);
+  assert.equal((await linkOf(store, DROPPED)).sourceStatus, "gone");
+  assert.equal(store.venues.find((v) => v.id === venueId)!.isActive, false, "gone deactivates");
+
+  // once gone, further healthy runs leave it alone (no-op), and the row was never removed
+  const after = await planWith(store, withoutDropped);
+  assert.deepEqual(destructive(after), []);
+  assert.equal(after.reconciliation.actions.find((a) => a.key === DROPPED)!.transition, "no-op");
+  assert.ok(store.venues.some((v) => v.id === venueId), "the venue row still exists — no hard delete");
+  // no lifecycle transition the engine can emit is a delete or a cancellation
+  for (const a of after.reconciliation.actions) {
+    assert.ok(["no-op", "keep-active", "mark-stale", "mark-missing", "mark-gone"].includes(a.transition), a.transition);
+  }
+
+  // seen again: reactivated in place, misses reset
+  const back = await planWith(store, async () => FIXTURE);
+  assert.equal(back.reconciliation.actions.find((a) => a.key === DROPPED)!.transition, "keep-active");
+  await store.apply(back, { commit: true });
+  const link = await linkOf(store, DROPPED);
+  assert.deepEqual([link.sourceStatus, link.consecutiveMisses, link.canonicalId], ["active", 0, venueId]);
+  assert.equal(store.venues.find((v) => v.id === venueId)!.isActive, true);
+});
+
+test("[lifecycle B] failed, empty, collapsed and partial runs change NO venue lifecycle state for a venue they did not return", async () => {
+  const scenarios: [string, (store: InMemoryCanonicalStore) => ReturnType<typeof planWith>][] = [
+    ["failed (Overpass error)", (s) => planWith(s, async () => { throw new Error("Overpass returned an error remark: runtime error"); })],
+    ["degraded (empty snapshot)", (s) => planWith(s, async () => ({ elements: [] }))],
+    ["degraded (collapsed snapshot)", (s) => planWith(s, async () => ({ elements: (FIXTURE.elements ?? []).filter((e) => e.id === 1001) }))],
+    ["partial run", (s) => {
+      const provider = createOsmConfigProvider([BELGRADE]);
+      const adapter = createOsmOverpassAdapter({ targets: [BELGRADE], config: CONFIG, transport: async () => ({ elements: (FIXTURE.elements ?? []).filter((e) => e.id === 1001) }), now: () => NOW });
+      return planSync({ adapter, source: provider.source(OSM_SOURCE_KEY)!, config: provider, store: s, now: NOW, runId: "r", completeness: "partial" });
+    }],
+  ];
+  for (const [name, run] of scenarios) {
+    const { store } = await syncedBelgrade();
+    const before = await linkOf(store, DROPPED);
+    const venueId = before.canonicalId;
+    const p = await run(store);
+    assert.deepEqual(destructive(p), [], `${name}: no stale / missing / gone action`);
+    assert.equal(p.reconciliation.actions.some((a) => a.key === DROPPED), false, `${name}: the absent venue is not reconciled at all`);
+    if (name !== "partial run") {
+      assert.equal(p.stats.healthy, false, `${name}: unhealthy`);
+      assert.equal(p.reconciliation.reconciled, false, `${name}: reconciliation skipped`);
+      assert.ok(p.reconciliation.skippedReason, `${name}: skip reason recorded`);
+    }
+    await store.apply(p, { commit: true });
+    const link = await linkOf(store, DROPPED);
+    assert.equal(link.sourceStatus, "active", `${name}: lifecycle unchanged`);
+    assert.equal(link.consecutiveMisses, 0, `${name}: miss counter unchanged`);
+    const venue = store.venues.find((v) => v.id === venueId)!;
+    assert.ok(venue, `${name}: venue row kept`);
+    assert.equal(venue.isActive, true, `${name}: is_active unchanged`);
+  }
+});
+
+test("[lifecycle C] a venue with NO events is not a lifecycle candidate: OSM reconciles venues only, driven by source presence", async () => {
+  const provider = createOsmConfigProvider([BELGRADE]);
+  assert.deepEqual(provider.source(OSM_SOURCE_KEY)!.kinds, ["venue"], "OSM reconciliation never looks at events");
+
+  const { store, synced } = await syncedBelgrade();
+  assert.equal(store.events.length, 0, "no venue has any event");
+  const p = await planWith(store, async () => FIXTURE);
+  assert.equal(p.reconciliation.reconciled, true);
+  assert.deepEqual(destructive(p), [], "event absence produces no lifecycle action");
+  assert.equal(p.reconciliation.actions.length, synced);
+  assert.ok(p.reconciliation.actions.every((a) => a.kind === "venue" && a.transition === "keep-active"));
+  await store.apply(p, { commit: true });
+  for (const v of store.venues) assert.equal(v.isActive, true, `${v.name} stays active`);
+  for (const l of await store.listSourceLinks("venue", OSM_SOURCE_KEY)) assert.equal(l.sourceStatus, "active");
+});
+
+// ── [lifecycle S*] persisted through SupabaseCanonicalStore (fake Supabase) ──
+type FakeRow = Record<string, unknown>;
+const without8008: OverpassResponse = { elements: (FIXTURE.elements ?? []).filter((e) => e.id !== 8008) };
+
+/** Belgrade synced once through the Supabase store; plus a hand-seeded venue, a
+ * venue owned by another source, an OSM venue in an out-of-scope city, and two
+ * historical events at the venue that will disappear (node/8008). */
+async function lifecycleDb() {
+  const fake = new FakeSupabase();
+  fake.seed("countries", [{ id: "RS", name: "Serbia" }]);
+  fake.seed("cities", [
+    { id: "city-bg", country_id: "RS", name: "Belgrade" },
+    { id: "city-ns", country_id: "RS", name: "Novi Sad" },
+  ]);
+  fake.seed("data_sources", [
+    { id: "ds-osm", name: "OpenStreetMap", type: "api" },
+    { id: "ds-g", name: "gigstix", type: "scraper" },
+  ]);
+  fake.seed("venues", [
+    { id: "v-manual", city_id: "city-bg", name: "Hand Seeded Lounge", name_normalized: "hand seeded lounge", is_active: true, source_status: "active", consecutive_misses: 0, created_at: NOW, updated_at: NOW },
+    { id: "v-gigs", city_id: "city-bg", name: "Gigs Only Hall", name_normalized: "gigs only hall", is_active: true, source_status: "active", consecutive_misses: 0, source_id: "ds-g", external_id: "gigs-venue-1", created_at: NOW, updated_at: NOW },
+    { id: "v-ns", city_id: "city-ns", name: "Novi Sad Bar", name_normalized: "novi sad bar", is_active: true, source_status: "active", consecutive_misses: 0, source_id: "ds-osm", external_id: "node/7777777", created_at: NOW, updated_at: NOW },
+  ]);
+  const store = new SupabaseCanonicalStore(fake.asClient(), { now: () => NOW });
+  await runStore(store);
+  const dropped = fake.tables.venues.find((r) => r.external_id === "node/8008")!;
+  fake.seed("events", [
+    { id: "ev-past", venue_id: dropped.id, title: "Past gig", start_at: "2026-03-01T20:00:00.000Z", is_cancelled: false, source_id: "ds-g", external_id: "G-1", created_at: NOW, updated_at: NOW },
+    { id: "ev-next", venue_id: dropped.id, title: "Next gig", start_at: "2026-12-01T20:00:00.000Z", is_cancelled: false, source_id: "ds-g", external_id: "G-2", created_at: NOW, updated_at: NOW },
+  ]);
+  fake.writes.length = 0;
+  return { fake, store, droppedId: String(dropped.id) };
+}
+const lifecycleOf = (r: FakeRow) => [r.source_status ?? "active", r.consecutive_misses ?? 0, r.is_active];
+const rowById = (fake: FakeSupabase, id: string) => fake.tables.venues.find((r) => r.id === id)!;
+/** Writes in the log that touch row `id`. */
+const writesTo = (fake: FakeSupabase, id: string) => fake.writes.filter((w) => w.filters.some(([c, v]) => c === "id" && v === id));
+const lifecycleWrites = (fake: FakeSupabase) => fake.writes.filter((w) => "source_status" in w.values || "consecutive_misses" in w.values);
+
+test("[lifecycle S1] healthy misses #1-#4: stale/active → missing/active → gone/INACTIVE → gone (no further write); events byte-identical, nothing deleted", async () => {
+  const { fake, store, droppedId } = await lifecycleDb();
+  const events = JSON.stringify(fake.tables.events);
+  const venueCount = fake.tables.venues.length;
+  const expected = [
+    ["mark-stale", ["stale", 1, true]],
+    ["mark-missing", ["missing", 2, true]],
+    ["mark-gone", ["gone", 3, false]],
+    ["no-op", ["gone", 3, false]],
+  ] as const;
+  for (const [i, [transition, state]] of expected.entries()) {
+    fake.writes.length = 0;
+    const p = await runStore(store, without8008);
+    assert.equal(p.stats.healthy, true);
+    assert.equal(p.reconciliation.actions.find((a) => a.key === DROPPED)!.transition, transition, `miss #${i + 1}`);
+    assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), state, `miss #${i + 1}`);
+    // only the dropped venue's lifecycle is written; nothing at all on miss #4
+    assert.deepEqual(
+      lifecycleWrites(fake).map((w) => w.filters.find(([c]) => c === "id")![1]),
+      transition === "no-op" ? [] : [droppedId],
+      `miss #${i + 1}`,
+    );
+    if (transition === "no-op") assert.deepEqual(writesTo(fake, droppedId), [], "a gone venue is not written again");
+    assert.equal(JSON.stringify(fake.tables.events), events, "historical + future events untouched");
+    assert.ok(!fake.writes.some((w) => w.table === "events"), "no event write");
+    assert.equal(fake.tables.venues.length, venueCount, "no venue removed or added");
+  }
+  // every other Belgrade OSM venue stayed active with no misses
+  for (const r of fake.tables.venues.filter((v) => v.source_id === "ds-osm" && v.city_id === "city-bg" && v.id !== droppedId)) {
+    assert.deepEqual(lifecycleOf(r), ["active", 0, true], String(r.name));
+  }
+});
+
+test("[lifecycle S2] a GONE venue seen again: same row reactivated, misses reset, no duplicate; then idempotent", async () => {
+  const { fake, store, droppedId } = await lifecycleDb();
+  for (let i = 0; i < 3; i++) await runStore(store, without8008);
+  assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["gone", 3, false]);
+  const venueCount = fake.tables.venues.length;
+
+  const back = await runStore(store);
+  const up = back.upserts.find((u) => u.record.provenance.externalId === "node/8008")!;
+  assert.deepEqual([up.operation, up.identity.tier, up.canonicalId], ["link-only", 0, droppedId], "matched to its own row");
+  assert.equal(back.reconciliation.actions.find((a) => a.key === DROPPED)!.transition, "keep-active");
+  assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["active", 0, true]);
+  assert.equal(fake.tables.venues.length, venueCount, "no duplicate venue");
+  assert.equal(fake.tables.venues.filter((r) => r.external_id === "node/8008").length, 1);
+
+  // repeated identical healthy snapshots: no lifecycle write, no new rows, nothing NEW
+  for (let i = 0; i < 2; i++) {
+    fake.writes.length = 0;
+    const again = await runStore(store);
+    assert.deepEqual(lifecycleWrites(fake), []);
+    assert.ok(!fake.writes.some((w) => w.op === "insert"), "no insert");
+    assert.equal(again.stats.byChangeStatus.NEW, 0);
+    assert.equal(fake.tables.venues.length, venueCount);
+  }
+});
+
+test("[lifecycle S3] stale / missing venues seen again reset to active (still active), misses 0", async () => {
+  for (const misses of [1, 2]) {
+    const { fake, store, droppedId } = await lifecycleDb();
+    for (let i = 0; i < misses; i++) await runStore(store, without8008);
+    assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), [misses === 1 ? "stale" : "missing", misses, true]);
+    await runStore(store);
+    assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["active", 0, true]);
+  }
+});
+
+test("[lifecycle S4] failed / empty / collapsed / partial runs: no lifecycle write, no miss increment, no is_active change — even for a SEEN stale venue in a partial run", async () => {
+  const provider = createOsmConfigProvider([BELGRADE]);
+  async function planAndApply(s: SupabaseCanonicalStore, transport: () => Promise<OverpassResponse>, completeness?: "partial") {
+    const adapter = createOsmOverpassAdapter({ targets: [BELGRADE], config: CONFIG, transport, now: () => NOW });
+    const p = await planSync({ adapter, source: provider.source(OSM_SOURCE_KEY)!, config: provider, store: s, now: NOW, runId: "r", completeness });
+    const res = await s.apply(p, { commit: true });
+    assert.equal(res.error, null);
+  }
+  const only = (...ids: number[]) => async (): Promise<OverpassResponse> => ({ elements: (FIXTURE.elements ?? []).filter((e) => ids.includes(e.id)) });
+  const scenarios: [string, (s: SupabaseCanonicalStore) => Promise<void>][] = [
+    ["failed", (s) => planAndApply(s, async () => { throw new Error("Overpass returned an error remark: runtime error"); })],
+    ["empty", (s) => planAndApply(s, async () => ({ elements: [] }))],
+    ["collapsed", (s) => planAndApply(s, only(1001))],
+    ["partial (8008 seen)", (s) => planAndApply(s, only(1001, 8008), "partial")],
+    ["partial (8008 unseen)", (s) => planAndApply(s, only(1001), "partial")],
+  ];
+  for (const [name, run] of scenarios) {
+    const { fake, store, droppedId } = await lifecycleDb();
+    await runStore(store, without8008); // one healthy miss → stale
+    const before = JSON.stringify(fake.tables.venues.map(lifecycleOf));
+    fake.writes.length = 0;
+    await run(store);
+    assert.deepEqual(lifecycleWrites(fake), [], `${name}: no lifecycle write`);
+    assert.ok(!fake.writes.some((w) => "is_active" in w.values), `${name}: no is_active write`);
+    assert.equal(JSON.stringify(fake.tables.venues.map(lifecycleOf)), before, `${name}: every venue's lifecycle unchanged`);
+    assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["stale", 1, true], name);
+  }
+});
+
+test("[lifecycle S5] only this source's in-scope venues are reconciled: hand-seeded, other-source and out-of-scope-city venues are never touched", async () => {
+  const { fake, store } = await lifecycleDb();
+  for (let i = 0; i < 4; i++) await runStore(store, without8008);
+  for (const id of ["v-manual", "v-gigs", "v-ns"]) {
+    assert.deepEqual(lifecycleOf(rowById(fake, id)), ["active", 0, true], id);
+    assert.deepEqual(writesTo(fake, id), [], `${id}: never written`);
+  }
+});
+
+test("[lifecycle S6] zero events, present in OSM → stays active across healthy runs with no lifecycle writes", async () => {
+  const { fake, store } = await lifecycleDb();
+  fake.seed("events", []); // no venue has any event
+  for (let i = 0; i < 4; i++) {
+    fake.writes.length = 0;
+    await runStore(store);
+    assert.deepEqual(lifecycleWrites(fake), []);
+  }
+  for (const r of fake.tables.venues.filter((v) => v.source_id === "ds-osm" && v.city_id === "city-bg")) {
+    assert.deepEqual(lifecycleOf(r), ["active", 0, true], String(r.name));
+  }
+});
+
+test("[lifecycle S7] content sync is unchanged alongside lifecycle: a reappearing gone venue with changed tags is reactivated AND updated", async () => {
+  const { fake, store, droppedId } = await lifecycleDb();
+  for (let i = 0; i < 3; i++) await runStore(store, without8008);
+  const changed: OverpassResponse = {
+    elements: (FIXTURE.elements ?? []).map((e) => (e.id === 8008 ? { ...e, tags: { ...e.tags, website: "https://random.example" } } : e)),
+  };
+  const first = await runStore(store, changed);
+  const up = first.upserts.find((u) => u.record.provenance.externalId === "node/8008")!;
+  assert.equal(up.canonicalId, droppedId);
+  assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["active", 0, true]);
+  if (rowById(fake, droppedId).website !== "https://random.example") await runStore(store, changed);
+  assert.equal(rowById(fake, droppedId).website, "https://random.example", "the OSM content update is still applied");
+  assert.equal(fake.tables.venues.filter((r) => r.external_id === "node/8008").length, 1);
+});
+
+test("[lifecycle S8] a curated is_active = false on an ACTIVE-lifecycle OSM venue is kept while OSM still has it (only GONE → seen reactivates)", async () => {
+  const { fake, store, droppedId } = await lifecycleDb();
+  rowById(fake, droppedId).is_active = false; // hidden by a curator; lifecycle still active
+  fake.writes.length = 0;
+  await runStore(store);
+  await runStore(store);
+  assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["active", 0, false]);
+  assert.ok(!fake.writes.some((w) => "is_active" in w.values));
+});
+
+// ── is_active has TWO meanings (one column) ──────────────────────────────
+// `venues.is_active` is both (a) source-lifecycle availability — set false by
+// the sync at `gone`, true again when the source returns it — and (b) a
+// curator's manual hide. There is no separate column for either. The sync
+// therefore only ever writes is_active on its OWN transitions (→ gone,
+// gone → seen); content sync never writes it (OSM omits isActive) and a
+// stale/missing reset leaves it alone. These tests pin both sides, including
+// the one case where the meanings collide.
+
+test("[lifecycle S9] curated hide survives a stale/missing → active reset: lifecycle resets, is_active stays false", async () => {
+  for (const misses of [1, 2]) {
+    const { fake, store, droppedId } = await lifecycleDb();
+    for (let i = 0; i < misses; i++) await runStore(store, without8008);
+    rowById(fake, droppedId).is_active = false; // hidden by a curator while stale / missing
+    fake.writes.length = 0;
+    await runStore(store);
+    assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["active", 0, false], `after ${misses} miss(es)`);
+    assert.ok(!fake.writes.some((w) => "is_active" in w.values), "the reset writes source_status / consecutive_misses only");
+  }
+});
+
+test("[lifecycle S10] KNOWN CONFLICT (current behaviour): a curator hide on a GONE venue is overridden when OSM returns it", async () => {
+  const { fake, store, droppedId } = await lifecycleDb();
+  for (let i = 0; i < 3; i++) await runStore(store, without8008);
+  assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["gone", 3, false]);
+  // a curator also hides it while gone: indistinguishable from the lifecycle's own false
+  rowById(fake, droppedId).is_active = false;
+  await runStore(store);
+  // locked rule 6 wins: reappearance after gone → is_active = true
+  assert.deepEqual(lifecycleOf(rowById(fake, droppedId)), ["active", 0, true]);
+});
+
+test("[lifecycle S11] locked contract, end to end on one venue: present → 3 misses → gone/inactive → 4th miss stays gone → back → active (no-write on miss #4: S1)", async () => {
+  const { fake, store, droppedId } = await lifecycleDb();
+  const trace: unknown[] = [lifecycleOf(rowById(fake, droppedId))];
+  for (let i = 0; i < 4; i++) {
+    await runStore(store, without8008);
+    trace.push(lifecycleOf(rowById(fake, droppedId)));
+  }
+  await runStore(store);
+  trace.push(lifecycleOf(rowById(fake, droppedId)));
+  assert.deepEqual(trace, [
+    ["active", 0, true],
+    ["stale", 1, true],
+    ["missing", 2, true],
+    ["gone", 3, false],
+    ["gone", 3, false],
+    ["active", 0, true],
+  ]);
+  assert.equal(fake.tables.venues.filter((r) => r.external_id === "node/8008").length, 1, "same row throughout");
+});

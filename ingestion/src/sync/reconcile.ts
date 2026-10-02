@@ -12,11 +12,14 @@
  *     Nothing is ever hard-deleted.
  *  4. Past events are FROZEN: always `no-op`, always retained.
  *  5. Explicitly cancelled records and records already `gone` are always
- *     `no-op` — and reconciliation NEVER reactivates them.
+ *     `no-op` — and reconciliation NEVER reactivates them. One exception: a
+ *     `gone` VENUE that the source returns again is `keep-active` — the source
+ *     object exists again, so the venue is reactivated and its misses reset.
+ *     An unseen `gone` venue stays `no-op` (no further transition).
  *
  * Precedence (this is the part that was previously wrong): the protected states
  * in (4) and (5) are checked BEFORE `seenKeys`. A gone/cancelled record that
- * re-appears in the source stays gone/cancelled; a frozen past event that
+ * re-appears in the source stays gone/cancelled (except a gone venue, see 5); a frozen past event that
  * re-appears is still untouched. Only a record that is NOT in a protected state
  * is subject to the seen → reset / unseen → lifecycle rules.
  */
@@ -73,6 +76,10 @@ export function planReconciliation(input: {
       continue;
     }
     if (rec.sourceStatus === "gone") {
+      if (rec.kind === "venue" && seenKeys.has(rec.key)) {
+        actions.push(action(rec, "keep-active", 0, "gone venue seen again — reactivated, misses cleared"));
+        continue;
+      }
       actions.push(
         action(rec, "no-op", rec.consecutiveMisses, "already gone — retained, never reactivated"),
       );
