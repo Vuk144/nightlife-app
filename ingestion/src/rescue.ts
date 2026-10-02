@@ -170,6 +170,14 @@ export const RESCUE_ENTRIES: RescueEntry[] = [
     osmRef: "node/4773685799",
     note: "Multi-functional art space with concerts, gigs and festivals (official site dorcolplatz.rs; GIGS TIX venue `dorcol-platz`, e.g. event 26383, ~14 m from this node). OSM node/4773685799 amenity=arts_centre wikidata=Q87988668 website=dorcolplatz.rs addr Добрачина 59b — no music signal, so pinned by exact osmRef; generic arts_centre stays signal-gated (Recall Audit follow-up, Dorćol Platz investigation, 2026-09-29).",
   },
+  {
+    countryId: "RS", cityName: "Belgrade",
+    name: "Central pub",
+    aliases: ["Central pub", "Central Pub"],
+    category: "pub_brewery",
+    osmRef: "node/11928740863",
+    note: "Pub with 50+ beers, cocktails and live performances, open 08–01 daily (official site centralpub.rs; Bul. Zorana Đinđića 106a, Novi Beograd). OSM node/11928740863 amenity=cafe with no nightlife tag — pinned by exact osmRef; generic cafes stay signal-gated and there is no general \"pub in name\" rule (Recall Audit follow-up, pub-named coverage audit, 2026-09-30).",
+  },
 ];
 
 /**

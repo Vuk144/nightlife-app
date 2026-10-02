@@ -153,7 +153,7 @@ test("every rescue entry is still ref-pinned and nothing is fetched by name", ()
 test("the Overpass query fetches node/4773685799 by exact id, although no Layer B clause would match it", () => {
   const q = buildOverpassQuery(BELGRADE);
   assert.ok(rescueOsmRefs("RS", "Belgrade").node.includes(4773685799));
-  assert.match(q, /\n  node\(id:[0-9,]*\b4773685799\);\n/);
+  assert.match(q, /\n  node\(id:[0-9,]*\b4773685799[,)]/);
   // it appears exactly once, and only in the Layer C id clause
   assert.equal(q.split("4773685799").length - 1, 1);
   // arts_centre is only ever requested together with a signal filter: every
