@@ -149,6 +149,26 @@ test("(a) gone + seen -> no-op, stays gone; reconciliation never reactivates it"
   assert.notEqual(a.transition, "keep-active");
 });
 
+test("(a2) VENUE exception: a gone venue seen again is keep-active (reactivated, misses 0); unseen it stays a no-op", () => {
+  const seen = reconcileOne({ kind: "venue", canonicalId: "v-1", sourceStatus: "gone", consecutiveMisses: 3 }, true);
+  assert.deepEqual([seen.from, seen.transition, seen.misses], ["gone", "keep-active", 0]);
+  const unseen = reconcileOne({ kind: "venue", canonicalId: "v-1", sourceStatus: "gone", consecutiveMisses: 3 }, false);
+  assert.deepEqual([unseen.from, unseen.transition, unseen.misses], ["gone", "no-op", 3], "no further transition, misses frozen");
+  // the exception is venue-only: a gone EVENT seen again is still never reactivated
+  assert.equal(reconcileOne({ kind: "event", sourceStatus: "gone", consecutiveMisses: 3 }, true).transition, "no-op");
+});
+
+test("(a3) venue lifecycle uses the same terms as events: miss 1/2/3 → mark-stale / mark-missing / mark-gone", () => {
+  const steps: string[] = [];
+  let state: Partial<SourceStateSnapshot> = { kind: "venue", sourceStatus: "active", consecutiveMisses: 0 };
+  for (let i = 0; i < 3; i++) {
+    const a = reconcileOne(state, false);
+    steps.push(a.transition);
+    state = { ...state, sourceStatus: a.transition === "mark-stale" ? "stale" : a.transition === "mark-missing" ? "missing" : "gone", consecutiveMisses: a.misses };
+  }
+  assert.deepEqual(steps, ["mark-stale", "mark-missing", "mark-gone"]);
+});
+
 test("(b) cancelled + seen -> no-op; reconciliation never un-cancels / reactivates", () => {
   const a = reconcileOne({ cancelled: true, sourceStatus: "stale", consecutiveMisses: 3 }, true);
   assert.equal(a.transition, "no-op");

@@ -9,6 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
 import { planSync } from "../../src/sync/engine.ts";
 import { SupabaseCanonicalStore } from "../../src/sync/supabase-store.ts";
 import { eventComparable, venueComparable } from "../../src/sync/store.ts";
@@ -1257,5 +1258,76 @@ test("[presence] a NEW venue with omitted fields is inserted with null columns, 
   for (const col of ["address", "website", "wikidata", "opening_hours"]) {
     assert.ok(col in row, `${col} column must be written`);
     assert.strictEqual(row[col], null, `${col} must be null`);
+  }
+});
+
+// ── venue lifecycle must never cost historical events ───────────────────
+//
+// `events.venue_id` is `NOT NULL REFERENCES venues(id) ON DELETE CASCADE`
+// (initial schema): hard-deleting a venue would silently delete every event
+// that ever happened there. A venue that left its source goes through
+// source_status stale → missing → gone and, at gone, `is_active = false` —
+// never a delete.
+// The real FK cannot be exercised here without a database, so these tests pin
+// (1) the schema fact that makes a delete destructive and (2) the store
+// contract that no lifecycle transition reaches a delete or touches events.
+
+test("[lifecycle D] schema: events.venue_id cascades on venue delete — so a venue delete would destroy its historical events", () => {
+  const dir = new URL("../../../supabase/migrations/", import.meta.url);
+  const sql = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f) => readFileSync(new URL(f, dir), "utf8"));
+  const all = sql.join("\n");
+  assert.match(all, /create table public\.events \([^;]*venue_id uuid not null references public\.venues\(id\) on delete cascade/);
+  // no later migration redefines that foreign key
+  assert.equal(all.match(/events[^;]*venue_id[^;]*references/g)?.length, 1);
+});
+
+test("[lifecycle D] SupabaseCanonicalStore never issues a delete", () => {
+  const src = readFileSync(new URL("../../src/sync/supabase-store.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /\.delete\(/);
+});
+
+test("[lifecycle D] applying stale / missing / gone for a venue with historical events keeps the venue row and every event untouched", async () => {
+  // FakeSupabase deliberately has no `.delete()`: any delete attempt would throw.
+  assert.equal((new FakeSupabase().from("venues") as unknown as Record<string, unknown>).delete, undefined);
+
+  for (const transition of ["mark-stale", "mark-missing", "mark-gone"] as const) {
+    const fake = new FakeSupabase();
+    seedGeography(fake);
+    fake.seed("data_sources", [
+      { id: "ds-osm", name: "OpenStreetMap", type: "api" },
+      { id: "ds-g", name: "gigstix", type: "scraper" },
+    ]);
+    fake.seed("venues", [
+      { id: "v-gone", city_id: CITY_IDS.Belgrade, name: "Closed Bar", name_normalized: "closed", is_active: true, source_id: "ds-osm", external_id: "node/8008", created_at: NOW, updated_at: NOW },
+    ]);
+    fake.seed("events", [
+      { id: "ev-past", venue_id: "v-gone", title: "Past gig", start_at: "2026-03-01T20:00:00.000Z", is_cancelled: false, source_id: "ds-g", external_id: "G-1", created_at: NOW, updated_at: NOW },
+      { id: "ev-next", venue_id: "v-gone", title: "Next gig", start_at: "2026-07-01T20:00:00.000Z", is_cancelled: false, source_id: "ds-g", external_id: "G-2", created_at: NOW, updated_at: NOW },
+    ]);
+    const eventsBefore = JSON.stringify(fake.tables.events);
+    const plan = {
+      run: { runId: "r1", sourceKey: "OpenStreetMap", startedAt: NOW, mode: "apply", scope: { countries: [], cities: [] } },
+      upserts: [],
+      reconciliation: {
+        reconciled: true,
+        runStatus: "ok",
+        actions: [{ key: "OpenStreetMap:node/8008", canonicalId: "v-gone", kind: "venue", from: "active", transition, misses: 3, note: "" }],
+        skippedReason: null,
+      },
+      reviewItems: [],
+      stats: {},
+    } as unknown as SyncPlan;
+
+    const res = await store(fake).apply(plan, { commit: true });
+
+    assert.equal(res.error, null, transition);
+    assert.deepEqual(fake.tables.venues.map((v) => v.id), ["v-gone"], `${transition}: venue row kept`);
+    assert.equal(JSON.stringify(fake.tables.events), eventsBefore, `${transition}: historical events byte-identical`);
+    assert.ok(!fake.writes.some((w) => w.table === "events"), `${transition}: no event write`);
+    // the only write is the venue's own lifecycle UPDATE (gone also deactivates)
+    assert.ok(fake.writes.every((w) => w.table === "venues" && w.op === "update"), `${transition}: ${JSON.stringify(fake.writes)}`);
+    const v = fake.tables.venues[0];
+    const status = transition === "mark-stale" ? "stale" : transition === "mark-missing" ? "missing" : "gone";
+    assert.deepEqual([v.source_status, v.consecutive_misses, v.is_active], [status, 3, status !== "gone"], transition);
   }
 });

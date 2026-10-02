@@ -226,7 +226,18 @@ export async function planSync(input: PlanSyncInput): Promise<SyncPlan> {
   }
 
   // ── reconciliation ───────────────────────────────────────────────
-  const allSnapshots = await buildSnapshots(store, source, now);
+  const sourceSnapshots = await buildSnapshots(store, source, now);
+  // A venue in a city outside this run's scope was never asked for, so it is
+  // not "missing" either: only in-scope venues take part in reconciliation.
+  const scopedIds = source.kinds.includes("venue") ? await venueIdsInScope(store, input.config, source) : null;
+  const allSnapshots = scopedIds
+    ? sourceSnapshots.filter((s) => s.kind !== "venue" || seenKeys.has(s.key) || scopedIds.has(s.canonicalId))
+    : sourceSnapshots;
+  if (allSnapshots.length < sourceSnapshots.length) {
+    stats.notes.push(
+      `${sourceSnapshots.length - allSnapshots.length} stored venue(s) outside this run's cities were not reconciled`,
+    );
+  }
   // A partial run speaks only for the records it saw: a stored record outside
   // the run is not "missing", so it takes no part in reconciliation at all.
   const snapshots =
@@ -833,6 +844,21 @@ function toStoredState(link: SourceLink): StoredRecordState {
     sourceStatus: link.sourceStatus,
     consecutiveMisses: link.consecutiveMisses,
   };
+}
+
+/** Ids of every stored venue in the cities this run covers (`citiesInScope`). */
+async function venueIdsInScope(
+  store: CanonicalStore,
+  config: PlanSyncInput["config"],
+  source: SourceConfig,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const city of config.citiesInScope(source)) {
+    const row = (await store.listCities(city.countryCode)).find((c) => c.name === city.canonicalName);
+    if (!row) continue;
+    for (const v of await store.listVenuesInCity(row.id)) ids.add(v.id);
+  }
+  return ids;
 }
 
 async function buildSnapshots(
